@@ -1,114 +1,259 @@
-# 4SSH_CONTROL
 
-This repository contains a Proof-of-Concept (PoC) for an SSH bastion server that enforces the "four-eyes principle" for administrative access. It acts as a Man-in-the-Middle (MITM) proxy, intercepting all commands from one administrator (Admin-1) and requiring real-time approval from a second administrator (Admin-2) before execution on the target server.
+# 4SSH_CONTROL 🔐🖥️
 
-## Concept
+Этот репозиторий содержит **Proof-of-Concept (PoC)** системы бастион‑сервера SSH, реализующей принцип **«четырёх глаз» 👀👀** для административного доступа.
 
-The system involves four components:
+Сервер выступает в роли **Man-in-the-Middle (MITM) прокси 🕵️‍♂️**, перехватывая все команды от одного администратора (**Admin‑1**) и требуя **подтверждения второго администратора (Admin‑2)** перед их выполнением на целевом сервере.
 
-1.  **Admin-1 (Operator):** The primary administrator who connects to the bastion and intends to run commands on the target server.
-2.  **Bastion Host (Proxy):** An intermediate server running the Python script. It accepts the connection from Admin-1, establishes its own connection to the Target Host, and manages the command approval flow.
-3.  **Admin-2 (Controller):** A second administrator who monitors the bastion's console. They see every command Admin-1 attempts to execute and must explicitly approve (`y`) or deny (`n`) it.
-4.  **Target Host:** The end server (e.g., production server, router) being administered. It only receives commands that have been approved by Admin-2.
+Такой подход повышает безопасность 🚨 и позволяет избежать случайных или вредоносных действий в продакшн‑системах.
 
-The workflow is as follows:
+---
+
+# 📦 Концепция
+
+Система состоит из **четырёх основных компонентов**:
+
+### 👨‍💻 1. Admin‑1 (Operator)
+Основной администратор, который подключается к бастиону и пытается выполнять команды на целевом сервере.
+
+### 🛡️ 2. Bastion Host (Proxy)
+Промежуточный сервер, на котором работает Python‑скрипт.
+
+Он:
+
+- принимает SSH‑подключение от **Admin‑1**
+- устанавливает соединение с **Target Host**
+- управляет процессом **подтверждения команд**
+
+### 👀 3. Admin‑2 (Controller)
+Второй администратор, который наблюдает за консолью бастиона.
+
+Он видит **каждую команду**, которую пытается выполнить Admin‑1, и должен:
+
+- ✅ подтвердить команду (`y`)
+- ❌ отклонить команду (`n`)
+
+### 🖥️ 4. Target Host
+Конечный сервер (например: production сервер, роутер или инфраструктурный узел).
+
+Он **получает только те команды, которые одобрил Admin‑2**.
+
+---
+
+# 🔄 Схема работы
+
 ```
-Admin-1 SSH Session --> [ Bastion Server ] --> Target Server
+Admin‑1 SSH Session --> [ Bastion Server ] --> Target Server
                            ^          |
                            |          |
-      (Command & Output) --+          +-- (Approve/Deny Prompt)
+     (Command & Output) ---+          +--- (Approve/Deny Prompt)
                            |
                            |
-                     Admin-2 Console
+                    Admin‑2 Console
 ```
 
-## Implementations
+📌 **Как это работает:**
 
-This repository includes two different implementations of the bastion server.
+1️⃣ Admin‑1 отправляет команду  
+2️⃣ Бастион **перехватывает её**  
+3️⃣ Admin‑2 получает запрос на подтверждение  
+4️⃣ Только после подтверждения команда отправляется на Target Server  
 
-### `main.py` - Simple Controller
+---
 
-This is a straightforward implementation where Admin-2's role is strictly to approve or deny commands.
+# ⚙️ Реализации
 
-*   **Functionality:** Intercepts each command entered by Admin-1 (after they press Enter) and prompts Admin-2 for a `y/n` decision in the bastion's terminal.
-*   **Admin-2 Interaction:** Can only approve or deny commands. Cannot type into the session.
-*   **Output:** The terminal output is color-coded to distinguish between system messages, Admin-1's proposed commands, and output from the target server.
+В репозитории есть **две версии бастион‑сервера**.
 
-### `secmain.py` - Interactive Controller
+---
 
-This is an advanced version that allows for a more collaborative session.
+# 📄 `main.py` — простой контроллер
 
-*   **Functionality:** In addition to approving/denying Admin-1's commands, Admin-2 can also type directly into the target session from the bastion's console.
-*   **Admin-2 Interaction:** Can approve/deny commands from Admin-1 *and* type their own commands. Admin-1 sees the input and output from Admin-2's actions in their own session.
-*   **Technology:** Uses `select` to simultaneously monitor input from Admin-1's SSH channel and Admin-2's local terminal (`stdin`).
+Базовая реализация, где Admin‑2 может **только подтверждать или отклонять команды**.
 
-## Requirements
+### Возможности
 
-The only external dependency is the `paramiko` library.
+🟣 Перехватывает каждую команду после нажатия `Enter`  
+🟣 Запрашивает у Admin‑2 решение `y/n`  
+🟣 Вывод в терминале **раскрашен** для удобства
+
+### Взаимодействие Admin‑2
+
+Admin‑2 может:
+
+✔ разрешить команду  
+❌ запретить команду  
+
+🚫 Вводить команды напрямую в сессию нельзя.
+
+---
+
+# 📄 `secmain.py` — интерактивный контроллер 🚀
+
+Продвинутая версия с **совместной сессией администрирования**.
+
+### Возможности
+
+✔ подтверждать / отклонять команды Admin‑1  
+✔ **самостоятельно вводить команды** в целевую сессию  
+
+Admin‑1 будет видеть:
+
+- команды Admin‑2
+- вывод этих команд
+
+### Технология
+
+Используется модуль **`select`**, который позволяет одновременно отслеживать:
+
+- SSH‑канал Admin‑1
+- локальный терминал Admin‑2 (`stdin`)
+
+---
+
+# 📋 Требования
+
+Единственная внешняя зависимость:
+
+**Paramiko** 🐍
+
+Установка:
 
 ```bash
 pip install paramiko
 ```
 
-## Usage
+---
 
-1.  **Start the Bastion Server (Admin-2)**
+# 🚀 Использование
 
-    On the bastion machine, run either script with the connection details for the target server. The script will listen for connections from Admin-1.
+## 1️⃣ Запуск бастион‑сервера (Admin‑2)
 
-    ```bash
-    # For the simple controller
-    python main.py --host <TARGET_IP> --user <TARGET_USER> --password <TARGET_PASS>
+На машине бастиона запустите один из скриптов.
 
-    # For the interactive controller
-    python secmain.py --host <TARGET_IP> --user <TARGET_USER> --password <TARGET_PASS>
-    ```
-    **Arguments:**
-    *   `--host`: IP address of the target server.
-    *   `--user`: Username for the target server.
-    *   `--password`: Password for the target server.
-    *   `--port` (optional): SSH port of the target server (default: 22).
-    *   `--listen` (optional): Port for the bastion to listen on (default: 2222).
+```bash
+# Простой контроллер
+python main.py --host <TARGET_IP> --user <TARGET_USER> --password <TARGET_PASS>
 
+# Интерактивный контроллер
+python secmain.py --host <TARGET_IP> --user <TARGET_USER> --password <TARGET_PASS>
+```
 
-2.  **Connect to the Bastion (Admin-1)**
+### Аргументы
 
-    Admin-1 connects to the bastion server using a standard SSH client. The username and password for this connection are ignored, as authentication is automatically successful.
+| Аргумент | Описание |
+|--------|--------|
+| `--host` | IP адрес целевого сервера |
+| `--user` | Пользователь на целевом сервере |
+| `--password` | Пароль |
+| `--port` | SSH порт (по умолчанию **22**) |
+| `--listen` | Порт бастиона (по умолчанию **2222**) |
 
-    ```bash
-    ssh anyuser@<BASTION_IP> -p 2222
-    ```
+---
 
-3.  **Monitor and Control (Admin-2)**
+# 🔑 2️⃣ Подключение к бастиону (Admin‑1)
 
-    Admin-2 watches the terminal where the bastion script is running.
+Admin‑1 подключается **обычным SSH‑клиентом**.
 
-    *   When Admin-1 types a command and presses `Enter`, it will appear in Admin-2's terminal with a confirmation prompt.
-    *   Admin-2 presses `y` to allow the command or `n` to block it.
-    *   If using `secmain.py`, Admin-2 can also type directly into this terminal to interact with the target server.
+Логин и пароль **игнорируются**, аутентификация автоматически успешна.
 
-### Example Workflow
+```bash
+ssh anyuser@<BASTION_IP> -p 2222
+```
 
-1.  **Admin-2** starts the server:
-    ```
-    python main.py --host 192.168.1.100 --user root --password toor
-    ```
-    Output:
-    ```
-    [*] Бастион запущен на порту 2222
-    [*] Целевой узел: root@192.168.1.100:22
-    [ГОТОВ] Ожидание подключения первого администратора...
-    ```
-2.  **Admin-1** connects:
-    ```
-    ssh john@<BASTION_IP> -p 2222
-    ```
-3.  **Admin-1** types `ls -l` and presses `Enter`.
+---
 
-4.  **Admin-2's** console shows the approval prompt:
-    ```
-    [КОНТРОЛЬ] Запрос на команду: ls -l | Разрешить? [y/n]:
-    ```
-5.  **Admin-2** presses `y`.
+# 👀 3️⃣ Мониторинг и управление (Admin‑2)
 
-6.  The command is executed on the target, and the output is displayed in both Admin-1's SSH session and Admin-2's console (in grey).
+Admin‑2 наблюдает за терминалом, где запущен бастион.
+
+Когда Admin‑1 вводит команду:
+
+1️⃣ Команда появляется в консоли Admin‑2  
+2️⃣ Появляется запрос подтверждения  
+
+```
+[CONTROL] Запрос команды: ls -l | Разрешить? [y/n]:
+```
+
+Admin‑2:
+
+- нажимает **y**, **t** ✅ чтобы разрешить
+- нажимает **n** ❌ чтобы заблокировать
+
+Если используется **secmain.py**, Admin‑2 может **сам писать команды** в терминал.
+
+---
+
+# 🧪 Пример рабочего процесса
+
+### 1️⃣ Admin‑2 запускает сервер
+
+```
+python main.py --host 192.168.1.100 --user root --password toor
+```
+
+Вывод:
+
+```
+[*] Бастион запущен на порту 2222
+[*] Целевой узел: root@192.168.1.100:22
+[READY] Ожидание подключения администратора...
+```
+
+---
+
+### 2️⃣ Admin‑1 подключается
+
+```
+ssh john@<BASTION_IP> -p 2222
+```
+
+---
+
+### 3️⃣ Admin‑1 вводит команду
+
+```
+ls -l
+```
+
+---
+
+### 4️⃣ Admin‑2 видит запрос
+
+```
+[CONTROL] Запрос на команду: ls -l | Разрешить? [y/n]:
+```
+
+---
+
+### 5️⃣ Admin‑2 нажимает
+
+```
+y
+```
+
+---
+
+### 6️⃣ Команда выполняется
+
+Результат отображается:
+
+- в SSH‑сессии **Admin‑1**
+- в консоли **Admin‑2**
+
+---
+
+# 🛡️ Итог
+
+Этот PoC демонстрирует концепцию:
+
+✨ **двухфакторного администрирования серверов**  
+✨ предотвращения опасных команд  
+✨ полного аудита действий администраторов  
+
+Идеально подходит для:
+
+- production инфраструктуры 🏭
+- сетевого оборудования 🌐
+- критичных систем 🔒
