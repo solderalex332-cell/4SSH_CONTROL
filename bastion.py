@@ -11,6 +11,7 @@ import socket
 import sys
 import termios
 import threading
+import time
 import tty
 
 import paramiko
@@ -18,7 +19,7 @@ import paramiko
 import re
 
 from ai_defense.core.config import load_config
-from ai_defense.core.engine import AIEngine
+from ai_defense.core.engine import AIEngine, fetch_network_config
 from ai_defense.core.models import AgentDecision, FinalVerdict, Verdict
 
 INTERACTIVE_PROGRAMS = re.compile(
@@ -124,6 +125,44 @@ def _detect_shell_return(text: str) -> bool:
     return False
 
 
+def _detect_target_profile(engine: AIEngine, ssh_transport: paramiko.Transport,
+                           initial_data: str = "") -> tuple[str, str]:
+    """Auto-detect target device type from SSH banner and initial output.
+
+    Returns (profile_name, vendor) or ("linux", "") if no network profile matches.
+    """
+    banner = ""
+    try:
+        banner_raw = ssh_transport.get_banner()
+        if banner_raw:
+            banner = banner_raw.decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+
+    combined = f"{banner}\n{initial_data}"
+
+    for pname, profile in engine.cfg.target_profiles.items():
+        if profile.type != "network":
+            continue
+        for pat in profile.detect_banner:
+            if pat.lower() in combined.lower():
+                log.info("Auto-detected profile '%s' via banner match: '%s'", pname, pat)
+                return pname, profile.vendor
+
+    for pname, profile in engine.cfg.target_profiles.items():
+        if profile.type != "network":
+            continue
+        for pat in profile.detect_prompt:
+            try:
+                if re.search(pat, initial_data, re.MULTILINE):
+                    log.info("Auto-detected profile '%s' via prompt match: '%s'", pname, pat)
+                    return pname, profile.vendor
+            except re.error:
+                pass
+
+    return "linux", ""
+
+
 def handle_session(
     admin_chan: paramiko.Channel,
     gateway: GatewayServer,
@@ -139,17 +178,44 @@ def handle_session(
 
     username = gateway.username or "unknown"
     role = _resolve_role(engine, username, default_role)
-    session = engine.create_session(username=username, role=role)
-
-    print(f"\n{CLR_BOLD}{CLR_CYAN}╔══════════════════════════════════════════════╗{CLR_RESET}")
-    print(f"{CLR_BOLD}{CLR_CYAN}║  Новая сессия: {session.session_id:<28} ║{CLR_RESET}")
-    print(f"{CLR_BOLD}{CLR_CYAN}║  Пользователь: {username:<28} ║{CLR_RESET}")
-    print(f"{CLR_BOLD}{CLR_CYAN}║  Роль: {role:<36} ║{CLR_RESET}")
-    print(f"{CLR_BOLD}{CLR_CYAN}╚══════════════════════════════════════════════╝{CLR_RESET}\n")
+    session = None
 
     try:
         ssh.connect(target_host, target_port, target_user, target_pass)
         target_chan = ssh.invoke_shell()
+
+        time.sleep(0.5)
+        initial_data = ""
+        if target_chan.recv_ready():
+            raw = target_chan.recv(4096)
+            initial_data = raw.decode("utf-8", errors="ignore")
+            admin_chan.send(raw)
+            sys.stdout.write(f"{CLR_TARGET}{initial_data}{CLR_RESET}")
+            sys.stdout.flush()
+
+        profile_name, vendor = _detect_target_profile(engine, ssh.get_transport(), initial_data)
+        session = engine.create_session(username=username, role=role,
+                                        target_profile=profile_name, target_vendor=vendor)
+
+        is_network = engine.is_network_session(session)
+        profile_display = f"{vendor}" if vendor else profile_name
+
+        if is_network:
+            profile_obj = engine.get_profile(profile_name)
+            if profile_obj and profile_obj.context_command:
+                print(f"{CLR_SYSTEM}[*] Загрузка конфигурации устройства ({profile_obj.context_command})...{CLR_RESET}")
+                session.network_context = fetch_network_config(ssh, profile_obj)
+                if session.network_context:
+                    print(f"{CLR_SYSTEM}[*] Конфигурация загружена: {len(session.network_context)} байт{CLR_RESET}")
+                else:
+                    print(f"{CLR_WARN}[!] Не удалось загрузить конфигурацию устройства{CLR_RESET}")
+
+        print(f"\n{CLR_BOLD}{CLR_CYAN}╔══════════════════════════════════════════════╗{CLR_RESET}")
+        print(f"{CLR_BOLD}{CLR_CYAN}║  Новая сессия: {session.session_id:<28} ║{CLR_RESET}")
+        print(f"{CLR_BOLD}{CLR_CYAN}║  Пользователь: {username:<28} ║{CLR_RESET}")
+        print(f"{CLR_BOLD}{CLR_CYAN}║  Роль: {role:<36} ║{CLR_RESET}")
+        print(f"{CLR_BOLD}{CLR_CYAN}║  Профиль: {profile_display:<32} ║{CLR_RESET}")
+        print(f"{CLR_BOLD}{CLR_CYAN}╚══════════════════════════════════════════════╝{CLR_RESET}\n")
 
         interactive_lock = threading.Lock()
         interactive_mode = False
@@ -322,10 +388,11 @@ def handle_session(
     except Exception as exc:
         print(f"\n{CLR_ERROR}[!] Ошибка сессии: {exc}{CLR_RESET}")
     finally:
-        engine.end_session(session)
+        if session is not None:
+            engine.end_session(session)
+            print(f"{CLR_SYSTEM}[*] Сессия {session.session_id} завершена{CLR_RESET}")
         admin_chan.close()
         ssh.close()
-        print(f"{CLR_SYSTEM}[*] Сессия {session.session_id} завершена{CLR_RESET}")
 
 
 def _resolve_role(engine: AIEngine, username: str, default_role: str = "ops") -> str:

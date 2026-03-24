@@ -61,12 +61,14 @@ def _render_dashboard(audit: AuditLogger) -> str:
         cmd_escaped = _html_escape(str(entry["command"]))
         reason_escaped = _html_escape(str(entry.get("reason", "")))
         username_escaped = _html_escape(str(entry.get("username", "")))
+        profile = entry.get("target_vendor") or entry.get("target_profile") or "linux"
 
         log_rows += f"""
         <tr>
             <td class="ts">{ts}</td>
             <td>{str(entry.get('session_id', ''))[:8]}</td>
             <td>{username_escaped}</td>
+            <td class="profile-cell">{_html_escape(profile)}</td>
             <td><code>{cmd_escaped}</code></td>
             <td><span class="badge" style="background:{vc}">{v.upper()}</span>{esc_label}</td>
             <td><span class="badge-sm" style="background:{sc}">{sev}</span></td>
@@ -104,10 +106,12 @@ def _render_dashboard(audit: AuditLogger) -> str:
   .col-ts {{ width:130px; }}
   .col-sess {{ width:70px; }}
   .col-user {{ width:80px; }}
-  .col-cmd {{ width:25%; }}
+  .col-profile {{ width:80px; }}
+  .col-cmd {{ width:22%; }}
   .col-verdict {{ width:110px; }}
   .col-sev {{ width:70px; }}
   .col-reason {{ }}
+  .profile-cell {{ color:var(--accent); font-size:0.75rem; }}
   code {{ background:rgba(56,189,248,0.1); padding:2px 6px; border-radius:4px; font-size:0.8rem; word-break:break-all; }}
   .badge {{ display:inline-block; padding:2px 10px; border-radius:999px; color:#fff; font-size:0.7rem; font-weight:600; white-space:nowrap; }}
   .badge-sm {{ display:inline-block; padding:1px 6px; border-radius:999px; color:#fff; font-size:0.65rem; }}
@@ -138,9 +142,9 @@ def _render_dashboard(audit: AuditLogger) -> str:
 <div style="overflow-x:auto;">
 <table>
   <thead><tr>
-    <th class="col-ts">Время</th><th class="col-sess">Сессия</th><th class="col-user">Пользователь</th><th class="col-cmd">Команда</th><th class="col-verdict">Вердикт</th><th class="col-sev">Severity</th><th class="col-reason">Причина</th>
+    <th class="col-ts">Время</th><th class="col-sess">Сессия</th><th class="col-user">Пользователь</th><th class="col-profile">Профиль</th><th class="col-cmd">Команда</th><th class="col-verdict">Вердикт</th><th class="col-sev">Severity</th><th class="col-reason">Причина</th>
   </tr></thead>
-  <tbody>{log_rows if log_rows else '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:40px;">Нет данных</td></tr>'}</tbody>
+  <tbody>{log_rows if log_rows else '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:40px;">Нет данных</td></tr>'}</tbody>
 </table>
 </div>
 

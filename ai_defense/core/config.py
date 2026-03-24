@@ -147,6 +147,25 @@ class BastionConfig:
 
 
 @dataclass
+class NetworkProfileRules:
+    safe_commands: list[str] = field(default_factory=list)
+    dangerous_patterns: list[BlacklistRule] = field(default_factory=list)
+    critical_patterns: list[BlacklistRule] = field(default_factory=list)
+    escalation_patterns: list[EscalationRule] = field(default_factory=list)
+
+
+@dataclass
+class TargetProfile:
+    type: str = "linux"                     # linux | network
+    vendor: str = ""                        # cisco_ios | cisco_nxos | junos | mikrotik | huawei_vrp | arista_eos | generic_network
+    detect_banner: list[str] = field(default_factory=list)
+    detect_prompt: list[str] = field(default_factory=list)
+    context_command: str = ""               # e.g. "show running-config"
+    context_max_bytes: int = 8192
+    network_rules: NetworkProfileRules = field(default_factory=NetworkProfileRules)
+
+
+@dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     agents: dict[str, AgentToggle] = field(default_factory=dict)
@@ -157,6 +176,7 @@ class AppConfig:
     audit: AuditConfig = field(default_factory=AuditConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     bastion: BastionConfig = field(default_factory=BastionConfig)
+    target_profiles: dict[str, TargetProfile] = field(default_factory=dict)
 
 
 def _build_dataclass(cls: type, data: dict[str, Any] | None):
@@ -226,6 +246,32 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     dashboard = _build_dataclass(DashboardConfig, raw.get("dashboard"))
     bastion = _build_dataclass(BastionConfig, raw.get("bastion"))
 
+    tp_raw = raw.get("target_profiles", {})
+    target_profiles: dict[str, TargetProfile] = {}
+    for pname, pvals in tp_raw.items():
+        if not isinstance(pvals, dict):
+            continue
+        pvals = dict(pvals)
+        nr_raw = pvals.pop("network_rules", {})
+        nr = NetworkProfileRules()
+        if isinstance(nr_raw, dict):
+            nr.safe_commands = nr_raw.get("safe_commands", [])
+            nr.dangerous_patterns = [
+                BlacklistRule(**item) if isinstance(item, dict) else BlacklistRule(pattern=str(item), reason="")
+                for item in nr_raw.get("dangerous_patterns", [])
+            ]
+            nr.critical_patterns = [
+                BlacklistRule(**item) if isinstance(item, dict) else BlacklistRule(pattern=str(item), reason="")
+                for item in nr_raw.get("critical_patterns", [])
+            ]
+            nr.escalation_patterns = [
+                EscalationRule(**item) if isinstance(item, dict) else EscalationRule(pattern=str(item), reason="")
+                for item in nr_raw.get("escalation_patterns", [])
+            ]
+        profile = _build_dataclass(TargetProfile, pvals)
+        profile.network_rules = nr
+        target_profiles[pname] = profile
+
     return AppConfig(
         llm=llm,
         agents=agents,
@@ -236,4 +282,5 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         audit=audit,
         dashboard=dashboard,
         bastion=bastion,
+        target_profiles=target_profiles,
     )

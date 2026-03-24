@@ -39,9 +39,12 @@ class AuditLogger:
                 reason      TEXT    NOT NULL DEFAULT '',
                 severity    TEXT    NOT NULL DEFAULT '',
                 agents_json TEXT    NOT NULL DEFAULT '[]',
-                escalated   INTEGER NOT NULL DEFAULT 0
+                escalated   INTEGER NOT NULL DEFAULT 0,
+                target_profile TEXT NOT NULL DEFAULT '',
+                target_vendor  TEXT NOT NULL DEFAULT ''
             )
         """)
+        self._migrate_add_profile_columns()
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id  TEXT PRIMARY KEY,
@@ -56,6 +59,19 @@ class AuditLogger:
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_verdict ON audit_log(verdict)")
         self._conn.commit()
+
+    def _migrate_add_profile_columns(self) -> None:
+        """Add target_profile/target_vendor columns if they don't exist (upgrade path)."""
+        try:
+            cur = self._conn.execute("PRAGMA table_info(audit_log)")
+            existing = {row[1] for row in cur.fetchall()}
+            if "target_profile" not in existing:
+                self._conn.execute("ALTER TABLE audit_log ADD COLUMN target_profile TEXT NOT NULL DEFAULT ''")
+            if "target_vendor" not in existing:
+                self._conn.execute("ALTER TABLE audit_log ADD COLUMN target_vendor TEXT NOT NULL DEFAULT ''")
+            self._conn.commit()
+        except Exception as exc:
+            log.warning("Profile column migration: %s", exc)
 
     def log_decision(self, session: SessionContext, command: str, verdict: FinalVerdict) -> None:
         ts = time.time()
@@ -81,11 +97,12 @@ class AuditLogger:
         try:
             with self._lock:
                 self._conn.execute(
-                    "INSERT INTO audit_log (timestamp, session_id, username, role, command, verdict, reason, severity, agents_json, escalated) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO audit_log (timestamp, session_id, username, role, command, verdict, reason, severity, agents_json, escalated, target_profile, target_vendor) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (ts, session.session_id, session.username, session.role,
                      command, verdict.verdict.value, verdict.reason, max_severity,
-                     agents_json, int(verdict.escalated)),
+                     agents_json, int(verdict.escalated),
+                     getattr(session, "target_profile", ""), getattr(session, "target_vendor", "")),
                 )
                 self._conn.commit()
         except Exception as exc:
@@ -101,6 +118,8 @@ class AuditLogger:
             "reason": verdict.reason,
             "severity": max_severity,
             "escalated": verdict.escalated,
+            "target_profile": getattr(session, "target_profile", ""),
+            "target_vendor": getattr(session, "target_vendor", ""),
             "agents": agents_data,
         }
         try:
@@ -134,11 +153,13 @@ class AuditLogger:
     def get_recent_logs(self, limit: int = 100) -> list[dict]:
         with self._lock:
             cur = self._conn.execute(
-                "SELECT timestamp, session_id, username, role, command, verdict, reason, severity, escalated "
+                "SELECT timestamp, session_id, username, role, command, verdict, reason, severity, escalated, "
+                "COALESCE(target_profile, '') as target_profile, COALESCE(target_vendor, '') as target_vendor "
                 "FROM audit_log ORDER BY id DESC LIMIT ?",
                 (limit,),
             )
-            cols = ["timestamp", "session_id", "username", "role", "command", "verdict", "reason", "severity", "escalated"]
+            cols = ["timestamp", "session_id", "username", "role", "command", "verdict", "reason", "severity",
+                    "escalated", "target_profile", "target_vendor"]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def get_stats(self) -> dict:

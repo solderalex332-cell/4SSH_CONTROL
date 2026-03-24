@@ -26,6 +26,7 @@ class CommandCategory(str, Enum):
     RECON = "recon"
     EXFIL = "exfil"
     PRIVILEGE_ESCALATION = "privesc"
+    CONFIG_CHANGE = "config_change"
     UNKNOWN = "unknown"
 
 
@@ -62,8 +63,11 @@ class SessionContext:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     username: str = ""
     role: str = ""
+    target_profile: str = ""
+    target_vendor: str = ""
     commands: list[SessionCommand] = field(default_factory=list)
     start_time: float = field(default_factory=time.time)
+    network_context: str = ""
 
     def add_command(self, cmd: str, verdict: Verdict | None = None) -> SessionCommand:
         entry = SessionCommand(command=cmd, verdict=verdict)
