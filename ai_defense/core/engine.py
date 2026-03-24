@@ -64,20 +64,19 @@ class AIEngine:
 
         self._audit = AuditLogger(cfg.audit)
         self._alerts = AlertEngine(cfg.alerts)
-        self._sessions: dict[str, SessionContext] = {}
         self._executor = ThreadPoolExecutor(max_workers=3)
         self._rate_buckets: dict[str, collections.deque] = {}
+        self._audit.cleanup_old_records()
 
     def create_session(self, username: str = "", role: str = "") -> SessionContext:
         session = SessionContext(username=username, role=role)
-        self._sessions[session.session_id] = session
         self._audit.log_session_start(session)
         log.info("Session started: %s user=%s role=%s", session.session_id, username, role)
         return session
 
     def end_session(self, session: SessionContext) -> None:
         self._audit.log_session_end(session)
-        self._sessions.pop(session.session_id, None)
+        self._rate_buckets.pop(session.session_id, None)
         log.info("Session ended: %s (%d commands)", session.session_id, len(session.commands))
 
     def _check_rate_limit(self, session: SessionContext) -> FinalVerdict | None:
@@ -122,7 +121,7 @@ class AIEngine:
             self._print_verdict(command, verdict, (time.perf_counter() - t0) * 1000)
             session.add_command(command, verdict.verdict)
             self._audit.log_decision(session, command, verdict)
-            if verdict.verdict == Verdict.DENY:
+            if verdict.verdict in (Verdict.DENY, Verdict.ESCALATE):
                 self._alerts.notify(session, command, verdict)
             return verdict
 
@@ -148,6 +147,21 @@ class AIEngine:
                     confidence=0.0,
                     reason=f"Ошибка: {exc}",
                 ))
+
+        for d in decisions:
+            if d.agent_name == "policy_enforcer" and d.verdict == Verdict.DENY \
+                    and d.confidence >= 0.95 and d.reason.startswith("RBAC:"):
+                verdict = FinalVerdict(
+                    verdict=Verdict.DENY,
+                    decisions=decisions,
+                    reason=d.reason,
+                )
+                elapsed = (time.perf_counter() - t0) * 1000
+                self._print_verdict(command, verdict, elapsed)
+                session.add_command(command, verdict.verdict)
+                self._audit.log_decision(session, command, verdict)
+                self._alerts.notify(session, command, verdict)
+                return verdict
 
         verdict = self._consensus.decide(decisions)
         elapsed = (time.perf_counter() - t0) * 1000

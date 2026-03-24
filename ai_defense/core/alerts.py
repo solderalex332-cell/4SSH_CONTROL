@@ -78,9 +78,40 @@ class AlertEngine:
         except Exception as exc:
             log.error("Telegram send failed: %s", exc)
 
+    @staticmethod
+    def _is_safe_url(url: str) -> bool:
+        """Block obvious SSRF targets: private IPs, link-local, localhost."""
+        from urllib.parse import urlparse
+        try:
+            host = urlparse(url).hostname or ""
+        except Exception:
+            return False
+        if not host:
+            return False
+        if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            return False
+        parts = host.split(".")
+        if len(parts) == 4:
+            try:
+                octets = list(map(int, parts))
+                if octets[0] == 10:
+                    return False
+                if octets[0] == 172 and 16 <= octets[1] <= 31:
+                    return False
+                if octets[0] == 192 and octets[1] == 168:
+                    return False
+                if octets[0] == 169 and octets[1] == 254:
+                    return False
+            except (ValueError, IndexError):
+                pass
+        return True
+
     def _send_webhook(self, session: SessionContext, command: str, verdict: FinalVerdict, sev: str) -> None:
         wh = self._cfg.webhook
         if not wh.url:
+            return
+        if not self._is_safe_url(wh.url):
+            log.warning("Webhook URL blocked (SSRF protection): %s", wh.url)
             return
         body = {
             "event": "ssh_bastion_alert",

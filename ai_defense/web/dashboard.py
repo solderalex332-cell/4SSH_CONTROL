@@ -1,22 +1,18 @@
 from __future__ import annotations
 
-import json
 import time
-from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from ..core.audit import AuditLogger
-
-TEMPLATE_DIR = Path(__file__).parent / "templates"
 
 
 def create_app(audit: AuditLogger) -> FastAPI:
     app = FastAPI(title="4SSH_CONTROL Dashboard", docs_url=None, redoc_url=None)
 
     @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request):
+    async def index():
         return _render_dashboard(audit)
 
     @app.get("/api/stats")

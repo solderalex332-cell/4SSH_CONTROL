@@ -168,6 +168,30 @@ class AuditLogger:
             cols = ["timestamp", "command", "verdict", "reason", "severity", "agents_json"]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
+    def cleanup_old_records(self) -> int:
+        """Delete audit records older than retention_days. Returns number of deleted rows."""
+        days = self._cfg.retention_days
+        if not days or days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        try:
+            with self._lock:
+                cur = self._conn.execute(
+                    "DELETE FROM audit_log WHERE timestamp < ?", (cutoff,),
+                )
+                self._conn.execute(
+                    "DELETE FROM sessions WHERE end_time IS NOT NULL AND end_time < ?",
+                    (cutoff,),
+                )
+                self._conn.commit()
+                deleted = cur.rowcount
+            if deleted:
+                log.info("Retention cleanup: removed %d records older than %d days", deleted, days)
+            return deleted
+        except Exception as exc:
+            log.error("Retention cleanup error: %s", exc)
+            return 0
+
     def close(self) -> None:
         if self._conn:
             self._conn.close()

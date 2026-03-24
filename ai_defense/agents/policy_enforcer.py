@@ -76,6 +76,58 @@ class PolicyEnforcerAgent:
         self._llm = llm
         self._rbac = rbac
 
+    @staticmethod
+    def _extract_base_command(command: str) -> str:
+        """Extract the base utility name from a command string."""
+        cmd = command.strip()
+        for prefix in ("sudo ", "busybox ", "env ", "command ", "exec "):
+            if cmd.startswith(prefix):
+                cmd = cmd[len(prefix):].lstrip()
+        return cmd.split()[0] if cmd.split() else ""
+
+    def _check_rbac_deterministic(self, command: str, role_policy) -> AgentDecision | None:
+        """Hard RBAC check before LLM — denied_commands and allowed_commands."""
+        base = self._extract_base_command(command)
+        if not base:
+            return None
+
+        cmd_parts = command.strip().split()
+
+        for denied in role_policy.denied_commands:
+            denied_parts = denied.strip().split()
+            if not denied_parts:
+                continue
+            if base == denied_parts[0]:
+                if len(denied_parts) == 1:
+                    return AgentDecision(
+                        agent_name=self.NAME,
+                        verdict=Verdict.DENY,
+                        confidence=1.0,
+                        reason=f"RBAC: команда '{base}' запрещена для роли",
+                        severity=Severity.HIGH,
+                    )
+                if cmd_parts[:len(denied_parts)] == denied_parts:
+                    return AgentDecision(
+                        agent_name=self.NAME,
+                        verdict=Verdict.DENY,
+                        confidence=1.0,
+                        reason=f"RBAC: '{' '.join(denied_parts)}' запрещена для роли",
+                        severity=Severity.HIGH,
+                    )
+
+        if "*" not in role_policy.allowed_commands:
+            allowed_bases = {c.split()[0] for c in role_policy.allowed_commands}
+            if base not in allowed_bases:
+                return AgentDecision(
+                    agent_name=self.NAME,
+                    verdict=Verdict.ESCALATE,
+                    confidence=0.9,
+                    reason=f"RBAC: команда '{base}' не в списке разрешённых для роли",
+                    severity=Severity.MEDIUM,
+                )
+
+        return None
+
     def evaluate(self, command: str, username: str, role: str) -> AgentDecision:
         t0 = time.perf_counter()
 
@@ -90,6 +142,11 @@ class PolicyEnforcerAgent:
                 severity=Severity.MEDIUM,
                 elapsed_ms=elapsed,
             )
+
+        rbac_hard = self._check_rbac_deterministic(command, role_policy)
+        if rbac_hard is not None:
+            rbac_hard.elapsed_ms = (time.perf_counter() - t0) * 1000
+            return rbac_hard
 
         high_risk = _is_high_risk_time(self._rbac.time_policy)
 
@@ -116,9 +173,15 @@ class PolicyEnforcerAgent:
                     elapsed_ms=elapsed,
                 )
 
-            verdict = Verdict(data.get("verdict", "escalate"))
-            severity = Severity(data.get("severity", "medium"))
-            confidence = float(data.get("confidence", 0.5))
+            try:
+                verdict = Verdict(data.get("verdict", "escalate"))
+            except ValueError:
+                verdict = Verdict.ESCALATE
+            try:
+                severity = Severity(data.get("severity", "medium"))
+            except ValueError:
+                severity = Severity.MEDIUM
+            confidence = min(max(float(data.get("confidence", 0.5)), 0.0), 1.0)
             reason = data.get("reason", "")
             violation = data.get("policy_violation")
 

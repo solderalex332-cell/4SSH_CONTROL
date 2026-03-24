@@ -68,7 +68,9 @@ class GatewayServer(paramiko.ServerInterface):
         return paramiko.AUTH_SUCCESSFUL
 
     def check_channel_request(self, kind: str, chanid: int) -> int:
-        return paramiko.OPEN_SUCCEEDED
+        if kind == "session":
+            return paramiko.OPEN_SUCCEEDED
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
     def check_channel_shell_request(self, channel: paramiko.Channel) -> bool:
         return True
@@ -85,15 +87,25 @@ def _bridge_with_callback(target_chan: paramiko.Channel, callback) -> None:
             if not data:
                 break
             callback(data)
-    except Exception:
+    except EOFError:
         pass
+    except Exception as exc:
+        log.warning("Target bridge error: %s", exc)
 
 
 _SHELL_PROMPT_RE = re.compile(
     r"(?:"
-    r"[\$#%>]\s*$"              # classic prompts: $, #, %, >
-    r"|@.*[:\~].*[\$#]\s*$"     # user@host:~$
-    r"|\]\$\s*$"                # [user@host ~]$
+    r"@.*[:\~].*[\$#]\s*$"         # user@host:~$  or  user@host:~/dir#
+    r"|\]\s*[\$#]\s*$"             # [user@host ~]$
+    r"|^[\w./~-]*\s*[\$#%]\s*$"    # path$ or path# or path% (but NOT > alone)
+    r")",
+)
+_REPL_PROMPT_RE = re.compile(
+    r"(?:"
+    r">>>\s*$"                     # Python REPL
+    r"|\.\.\.\s*$"                 # Python continuation
+    r"|\w+>\s*$"                   # mysql>, redis>, mongo>, psql>, irb>
+    r"|In\s*\[\d+\]:\s*$"         # IPython
     r")",
 )
 
@@ -104,6 +116,8 @@ def _detect_shell_return(text: str) -> bool:
     if not stripped:
         return False
     last_line = stripped.splitlines()[-1].strip()
+    if _REPL_PROMPT_RE.search(last_line):
+        return False
     if _SHELL_PROMPT_RE.search(last_line):
         return True
     return False
@@ -117,12 +131,13 @@ def handle_session(
     target_port: int,
     target_user: str,
     target_pass: str,
+    default_role: str = "ops",
 ) -> None:
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     username = gateway.username or "unknown"
-    role = _resolve_role(engine, username)
+    role = _resolve_role(engine, username, default_role)
     session = engine.create_session(username=username, role=role)
 
     print(f"\n{CLR_BOLD}{CLR_CYAN}╔══════════════════════════════════════════════╗{CLR_RESET}")
@@ -311,11 +326,11 @@ def handle_session(
         print(f"{CLR_SYSTEM}[*] Сессия {session.session_id} завершена{CLR_RESET}")
 
 
-def _resolve_role(engine: AIEngine, username: str) -> str:
+def _resolve_role(engine: AIEngine, username: str, default_role: str = "ops") -> str:
     users = engine.cfg.rbac.users
     if username in users:
         return users[username].role
-    return "ops"
+    return default_role if default_role else "ops"
 
 
 def _send_deny_details(admin_chan: paramiko.Channel, verdict) -> None:
@@ -437,6 +452,7 @@ def main() -> None:
                     cfg.bastion.target_port,
                     cfg.bastion.target_user,
                     cfg.bastion.target_password,
+                    default_role=args.role or "ops",
                 )
     except KeyboardInterrupt:
         pass

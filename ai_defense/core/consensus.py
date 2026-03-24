@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from .config import ConsensusConfig
 from .models import AgentDecision, FinalVerdict, Severity, Verdict
+
+log = logging.getLogger("ai_defense.consensus")
 
 
 class ConsensusEngine:
@@ -21,6 +25,8 @@ class ConsensusEngine:
             return self._any_deny(decisions)
         if strategy == "unanimous":
             return self._unanimous(decisions)
+        if strategy != "weighted_majority":
+            log.warning("Unknown consensus strategy '%s', falling back to weighted_majority", strategy)
         return self._weighted_majority(decisions)
 
     def _any_deny(self, decisions: list[AgentDecision]) -> FinalVerdict:

@@ -17,6 +17,167 @@ _CHAIN_SPLIT_RE = re.compile(r"\s*(?:;|&&|\|\||`|\$\()\s*")
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07")
 
 
+_ANSI_C_QUOTE_RE = re.compile(r"\$'([^']*)'")
+_MULTI_SPACE_RE = re.compile(r"  +")
+
+_RM_LONG_FLAGS = {
+    "--recursive": "-r",
+    "--force": "-f",
+    "--no-preserve-root": "",
+    "--verbose": "-v",
+}
+
+
+_SUDO_RE = re.compile(r"^sudo\s+(?:(?:-u\s+\S+|-[A-Za-z]+|--\S+)\s+)*")
+
+
+_PREFIX_WRAPPERS = re.compile(
+    r"^(?:doas\s+|busybox\s+|"
+    r"env(?:\s+(?:-\S+|\S+=\S+))*\s+|"
+    r"nice\s+|ionice\s+|timeout\s+\S+\s+|command\s+|exec\s+|"
+    r"strace\s+(?:-\S+\s+)*|ltrace\s+(?:-\S+\s+)*|"
+    r"su\s+-c\s+['\"]?|"
+    r"bash\s+-c\s+['\"]?|sh\s+-c\s+['\"]?|"
+    r"eval\s+['\"]?|"
+    r"chroot\s+\S+\s+)"
+)
+
+
+_UNICODE_CONFUSABLES = str.maketrans({
+    "\u2212": "-",   # MINUS SIGN → HYPHEN-MINUS
+    "\u2013": "-",   # EN DASH
+    "\u2014": "-",   # EM DASH
+    "\uff0d": "-",   # FULLWIDTH HYPHEN-MINUS
+    "\u2010": "-",   # HYPHEN
+    "\u2011": "-",   # NON-BREAKING HYPHEN
+    "\uff1b": ";",   # FULLWIDTH SEMICOLON
+    "\uff5c": "|",   # FULLWIDTH VERTICAL LINE
+    "\uff06": "&",   # FULLWIDTH AMPERSAND
+    "\u2018": "'",   # LEFT SINGLE QUOTATION
+    "\u2019": "'",   # RIGHT SINGLE QUOTATION
+    "\u201c": '"',   # LEFT DOUBLE QUOTATION
+    "\u201d": '"',   # RIGHT DOUBLE QUOTATION
+    "\uff0f": "/",   # FULLWIDTH SOLIDUS
+    "\u2215": "/",   # DIVISION SLASH
+    "\uff3e": "^",   # FULLWIDTH CIRCUMFLEX
+})
+
+
+_MULTI_SLASH_RE = re.compile(r"/{2,}")
+_DOT_SLASH_RE = re.compile(r"/\./")
+_DOTDOT_RE = re.compile(r"/[^/]+/\.\./")
+_ROOT_DOTDOT_RE = re.compile(r"/\.\./")
+
+
+def _normalize_paths(cmd: str) -> str:
+    """Collapse ///etc///shadow → /etc/shadow, /etc/./shadow → /etc/shadow, /tmp/../../ → /."""
+    cmd = _MULTI_SLASH_RE.sub("/", cmd)
+    prev = None
+    while cmd != prev:
+        prev = cmd
+        cmd = _DOT_SLASH_RE.sub("/", cmd)
+    prev = None
+    while cmd != prev:
+        prev = cmd
+        cmd = _DOTDOT_RE.sub("/", cmd)
+    cmd = _ROOT_DOTDOT_RE.sub("/", cmd)
+    return cmd
+
+
+def _normalize_shell_obfuscation(cmd: str) -> str:
+    """Normalize shell obfuscation: unicode, ANSI-C $'...', rm flag variants, command-name quoting."""
+    cmd = cmd.translate(_UNICODE_CONFUSABLES)
+    cmd = _ANSI_C_QUOTE_RE.sub(lambda m: _decode_ansi_c(m.group(1)), cmd)
+    cmd = _MULTI_SPACE_RE.sub(" ", cmd).strip()
+    cmd = _normalize_paths(cmd)
+    cmd = _normalize_command_name(cmd)
+    cmd = _unwrap_prefix_commands(cmd)
+    cmd = _normalize_rm_flags(cmd)
+    return cmd
+
+
+def _unwrap_prefix_commands(cmd: str) -> str:
+    """Strip known prefix wrappers so the actual command is visible to rules.
+
+    Returns BOTH the original and unwrapped forms joined by a newline
+    so regex can match either. The evaluate method splits on newline.
+    """
+    original = cmd
+    prev = None
+    unwrapped = cmd
+    while unwrapped != prev:
+        prev = unwrapped
+        m = _SUDO_RE.match(unwrapped)
+        if m:
+            unwrapped = unwrapped[m.end():].strip().lstrip("'\"")
+            continue
+        unwrapped = _PREFIX_WRAPPERS.sub("", unwrapped).strip().lstrip("'\"")
+    if unwrapped and unwrapped != original:
+        return original + "\n" + unwrapped
+    return original
+
+
+def _decode_ansi_c(inner: str) -> str:
+    """Decode \\x72\\x6d style ANSI-C content to plain text."""
+    try:
+        return inner.encode("utf-8").decode("unicode_escape")
+    except Exception:
+        return inner
+
+
+def _normalize_command_name(cmd: str) -> str:
+    """Strip quotes and backslashes only from the command name (first token)."""
+    if not cmd:
+        return cmd
+    i = 0
+    name_chars = []
+    while i < len(cmd) and cmd[i] not in (" ", "\t"):
+        ch = cmd[i]
+        if ch == "\\" and i + 1 < len(cmd):
+            name_chars.append(cmd[i + 1])
+            i += 2
+        elif ch in ("'", '"'):
+            i += 1
+        else:
+            name_chars.append(ch)
+            i += 1
+    rest = cmd[i:]
+    return "".join(name_chars) + rest
+
+
+def _normalize_rm_flags(cmd: str) -> str:
+    """Normalize rm --recursive --force / → rm -rf / and rm -r -f / → rm -rf /."""
+    parts = cmd.split()
+    if not parts:
+        return cmd
+    base = parts[0].rsplit("/", 1)[-1]
+    if base != "rm":
+        return cmd
+    flags = []
+    args = []
+    for p in parts[1:]:
+        if p.startswith("--"):
+            repl = _RM_LONG_FLAGS.get(p, p)
+            if repl:
+                flags.append(repl)
+        elif p.startswith("-") and not p[1:].lstrip("-").isdigit():
+            flags.append(p)
+        else:
+            args.append(p)
+    merged = set()
+    for f in flags:
+        for ch in f.lstrip("-"):
+            merged.add(ch)
+    canonical = ""
+    for ch in "rf":
+        if ch in merged:
+            canonical += ch
+            merged.discard(ch)
+    canonical += "".join(sorted(merged))
+    flag_str = "-" + canonical if canonical else ""
+    return " ".join(filter(None, [parts[0], flag_str] + args))
+
+
 class RuleEngine:
     """Layer-0 instant filter: whitelist/blacklist/sensitive paths."""
 
@@ -65,42 +226,50 @@ class RuleEngine:
 
     @staticmethod
     def sanitize(raw: str) -> str:
-        """Strip ANSI escapes and control characters from raw terminal input."""
+        """Strip ANSI escapes, control characters, and shell obfuscation from input."""
         cleaned = _ANSI_ESCAPE_RE.sub("", raw)
-        cleaned = "".join(ch for ch in cleaned if ch >= " " or ch in "\t\n\r")
-        return cleaned.strip()
+        cleaned = "".join(ch if (ch >= " " or ch in "\t\n\r") else " " for ch in cleaned)
+        cleaned = cleaned.strip()
+        cleaned = _normalize_shell_obfuscation(cleaned)
+        return cleaned
 
     def evaluate(self, command: str) -> AgentDecision | None:
         """Return an instant decision if the rule matches, else None (pass to agents)."""
         t0 = time.perf_counter()
-        stripped = self.sanitize(command)
-        if not stripped:
+        sanitized = self.sanitize(command)
+        if not sanitized or sanitized.startswith("#"):
             return None
-        normalized = stripped.lower()
 
-        for pattern, reason, severity in self._blacklist:
-            if pattern.search(stripped):
-                return AgentDecision(
-                    agent_name="rule_engine",
-                    verdict=Verdict.DENY,
-                    confidence=1.0,
-                    category=CommandCategory.DESTRUCTIVE,
-                    reason=reason,
-                    severity=severity,
-                    elapsed_ms=(time.perf_counter() - t0) * 1000,
-                )
+        variants = sanitized.split("\n")
+        primary = variants[0]
+        normalized = primary.lower()
 
-        sp_decision = self.check_sensitive_path(stripped)
-        if sp_decision is not None:
-            sp_decision.elapsed_ms = (time.perf_counter() - t0) * 1000
-            return sp_decision
+        for variant in variants:
+            for pattern, reason, severity in self._blacklist:
+                if pattern.search(variant):
+                    return AgentDecision(
+                        agent_name="rule_engine",
+                        verdict=Verdict.DENY,
+                        confidence=1.0,
+                        category=CommandCategory.DESTRUCTIVE,
+                        reason=reason,
+                        severity=severity,
+                        elapsed_ms=(time.perf_counter() - t0) * 1000,
+                    )
 
-        esc_decision = self._check_escalation_rules(stripped)
-        if esc_decision is not None:
-            esc_decision.elapsed_ms = (time.perf_counter() - t0) * 1000
-            return esc_decision
+        for variant in variants:
+            sp_decision = self.check_sensitive_path(variant)
+            if sp_decision is not None:
+                sp_decision.elapsed_ms = (time.perf_counter() - t0) * 1000
+                return sp_decision
 
-        sub_commands = _CHAIN_SPLIT_RE.split(stripped)
+        for variant in variants:
+            esc_decision = self._check_escalation_rules(variant)
+            if esc_decision is not None:
+                esc_decision.elapsed_ms = (time.perf_counter() - t0) * 1000
+                return esc_decision
+
+        sub_commands = _CHAIN_SPLIT_RE.split(primary)
         has_chain = len(sub_commands) > 1
         if has_chain:
             for sub in sub_commands:
@@ -130,7 +299,7 @@ class RuleEngine:
                 verdict=Verdict.ALLOW,
                 confidence=1.0,
                 category=CommandCategory.SAFE,
-                reason=f"Команда '{stripped}' в белом списке",
+                reason=f"Команда '{primary}' в белом списке",
                 severity=Severity.LOW,
                 elapsed_ms=(time.perf_counter() - t0) * 1000,
             )
@@ -164,18 +333,23 @@ class RuleEngine:
         return None
 
     def _evaluate_single(self, command: str) -> AgentDecision | None:
-        """Check a single (non-chained) command against blacklist only."""
-        stripped = command.strip()
-        for pattern, reason, severity in self._blacklist:
-            if pattern.search(stripped):
-                return AgentDecision(
-                    agent_name="rule_engine",
-                    verdict=Verdict.DENY,
-                    confidence=1.0,
-                    category=CommandCategory.DESTRUCTIVE,
-                    reason=reason,
-                    severity=severity,
-                )
+        """Check a single (non-chained) command against blacklist only.
+
+        Applies sanitization to catch obfuscation within sub-commands.
+        """
+        stripped = _normalize_shell_obfuscation(command.strip())
+        variants = stripped.split("\n")
+        for variant in variants:
+            for pattern, reason, severity in self._blacklist:
+                if pattern.search(variant):
+                    return AgentDecision(
+                        agent_name="rule_engine",
+                        verdict=Verdict.DENY,
+                        confidence=1.0,
+                        category=CommandCategory.DESTRUCTIVE,
+                        reason=reason,
+                        severity=severity,
+                    )
         return None
 
     def check_sensitive_path(self, command: str) -> AgentDecision | None:

@@ -79,10 +79,19 @@ class CommandClassifierAgent:
                     elapsed_ms=elapsed,
                 )
 
-            verdict = Verdict(data.get("verdict", "escalate"))
-            category = CommandCategory(data.get("category", "unknown"))
-            severity = Severity(data.get("severity", "medium"))
-            confidence = float(data.get("confidence", 0.5))
+            try:
+                verdict = Verdict(data.get("verdict", "escalate"))
+            except ValueError:
+                verdict = Verdict.ESCALATE
+            try:
+                category = CommandCategory(data.get("category", "unknown"))
+            except ValueError:
+                category = CommandCategory.UNKNOWN
+            try:
+                severity = Severity(data.get("severity", "medium"))
+            except ValueError:
+                severity = Severity.MEDIUM
+            confidence = min(max(float(data.get("confidence", 0.5)), 0.0), 1.0)
             reason = data.get("reason", "")
 
             return AgentDecision(

@@ -31,15 +31,26 @@ class LLMClient:
             ],
             temperature=temperature if temperature is not None else self._cfg.temperature,
         )
+        if not resp.choices:
+            log.warning("LLM returned empty choices")
+            return ""
         return resp.choices[0].message.content or ""
 
     def chat_json(self, system: str, user: str, temperature: float | None = None) -> dict[str, Any]:
         raw = self.chat(system, user, temperature)
-        raw = raw.strip()
-        if raw.startswith("```"):
+        raw = raw.strip().lstrip("\ufeff")
+        if "```" in raw:
             lines = raw.splitlines()
-            lines = [l for l in lines if not l.startswith("```")]
-            raw = "\n".join(lines)
+            inside = False
+            extracted = []
+            for line in lines:
+                if line.startswith("```"):
+                    inside = not inside
+                    continue
+                if inside:
+                    extracted.append(line)
+            if extracted:
+                raw = "\n".join(extracted)
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
