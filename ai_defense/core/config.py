@@ -46,9 +46,35 @@ class BlacklistRule:
 
 
 @dataclass
+class SensitivePath:
+    pattern: str
+    reason: str
+    severity: str = "high"
+    action: str = "escalate"     # deny | escalate
+
+
+@dataclass
+class DangerousContent:
+    pattern: str
+    reason: str
+    severity: str = "high"
+
+
+@dataclass
+class EscalationRule:
+    pattern: str
+    reason: str
+    severity: str = "high"
+    action: str = "escalate"     # escalate | deny
+
+
+@dataclass
 class RulesConfig:
     whitelist: list[str] = field(default_factory=list)
     blacklist: list[BlacklistRule] = field(default_factory=list)
+    sensitive_paths: list[SensitivePath] = field(default_factory=list)
+    dangerous_content: list[DangerousContent] = field(default_factory=list)
+    escalation_rules: list[EscalationRule] = field(default_factory=list)
 
 
 @dataclass
@@ -163,9 +189,18 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     rules_raw = raw.get("rules", {})
     bl_raw = rules_raw.get("blacklist", [])
     blacklist = [BlacklistRule(**item) if isinstance(item, dict) else BlacklistRule(pattern=str(item), reason="") for item in bl_raw]
+    sp_raw = rules_raw.get("sensitive_paths", [])
+    sensitive_paths = [SensitivePath(**item) if isinstance(item, dict) else SensitivePath(pattern=str(item), reason="") for item in sp_raw]
+    dc_raw = rules_raw.get("dangerous_content", [])
+    dangerous_content = [DangerousContent(**item) if isinstance(item, dict) else DangerousContent(pattern=str(item), reason="") for item in dc_raw]
+    er_raw = rules_raw.get("escalation_rules", [])
+    escalation_rules = [EscalationRule(**item) if isinstance(item, dict) else EscalationRule(pattern=str(item), reason="") for item in er_raw]
     rules = RulesConfig(
         whitelist=rules_raw.get("whitelist", []),
         blacklist=blacklist,
+        sensitive_paths=sensitive_paths,
+        dangerous_content=dangerous_content,
+        escalation_rules=escalation_rules,
     )
 
     rbac_raw = raw.get("rbac", {})
@@ -175,7 +210,10 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     users = {}
     for uname, uvals in rbac_raw.get("users", {}).items():
         users[uname] = _build_dataclass(UserMapping, uvals)
-    tp = _build_dataclass(TimePolicy, rbac_raw.get("time_policy"))
+    tp_raw = rbac_raw.get("time_policy", {})
+    if "high_risk_hours" in tp_raw:
+        tp_raw = tp_raw["high_risk_hours"]
+    tp = _build_dataclass(TimePolicy, tp_raw)
     rbac = RBACConfig(roles=roles, users=users, time_policy=tp)
 
     alerts_raw = raw.get("alerts", {})

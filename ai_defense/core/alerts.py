@@ -26,6 +26,10 @@ def _max_severity(verdict: FinalVerdict) -> str:
     return best
 
 
+def _escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 class AlertEngine:
     """Sends alerts via Telegram and/or webhook on deny/escalate events."""
 
@@ -42,19 +46,19 @@ class AlertEngine:
         reasons = []
         for d in verdict.decisions:
             if d.reason:
-                reasons.append(f"  • {d.agent_name}: {d.reason}")
+                reasons.append(f"  • {_escape_html(d.agent_name)}: {_escape_html(d.reason)}")
 
         text = (
-            f"{emoji} SSH Bastion Alert\n"
-            f"Verdict: {verdict.verdict.value.upper()}\n"
-            f"Severity: {sev}\n"
-            f"Session: {session.session_id}\n"
-            f"User: {session.username} ({session.role})\n"
-            f"Command: {command}\n"
-            f"Reason: {verdict.reason}\n"
+            f"{emoji} <b>SSH Bastion Alert</b>\n"
+            f"<b>Verdict:</b> {_escape_html(verdict.verdict.value.upper())}\n"
+            f"<b>Severity:</b> {_escape_html(sev)}\n"
+            f"<b>Session:</b> {_escape_html(session.session_id)}\n"
+            f"<b>User:</b> {_escape_html(session.username)} ({_escape_html(session.role)})\n"
+            f"<b>Command:</b> <code>{_escape_html(command)}</code>\n"
+            f"<b>Reason:</b> {_escape_html(verdict.reason)}\n"
         )
         if reasons:
-            text += "Agent details:\n" + "\n".join(reasons) + "\n"
+            text += "<b>Agent details:</b>\n" + "\n".join(reasons) + "\n"
 
         if self._cfg.telegram.enabled:
             self._send_telegram(text)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .config import AppConfig, ConsensusConfig
+from .config import ConsensusConfig
 from .models import AgentDecision, FinalVerdict, Severity, Verdict
 
 

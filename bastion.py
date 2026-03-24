@@ -14,9 +14,30 @@ import tty
 
 import paramiko
 
+import re
+
 from ai_defense.core.config import load_config
 from ai_defense.core.engine import AIEngine
 from ai_defense.core.models import Verdict
+
+INTERACTIVE_PROGRAMS = re.compile(
+    r"^(?:sudo\s+)?(?:vi|vim|nvim|nano|pico|emacs|mcedit|joe|jed"
+    r"|less|more|most|view"
+    r"|top|htop|btop|atop|iotop|nmon|glances"
+    r"|mysql|psql|mongo|mongosh|redis-cli|sqlite3"
+    r"|python3?|ipython|bpython|node|irb|lua|ghci|R"
+    r"|ssh|telnet|ftp|sftp"
+    r"|screen|tmux|byobu"
+    r"|man|info"
+    r"|mutt|neomutt|alpine"
+    r"|mc|ranger|nnn|vifm"
+    r"|docker\s+(?:exec\s+-it|run\s+-it|attach)"
+    r"|kubectl\s+exec\s+-it"
+    r"|crontab\s+-e"
+    r"|journalctl"
+    r")\b",
+    re.IGNORECASE,
+)
 
 CLR_RESET = "\033[0m"
 CLR_ADMIN1 = "\033[94m"
@@ -56,19 +77,36 @@ class GatewayServer(paramiko.ServerInterface):
         return True
 
 
-def bridge_target_output(target_chan: paramiko.Channel, admin_chan: paramiko.Channel) -> None:
-    """Forward target stdout → Admin-1 + local console mirror."""
+def _bridge_with_callback(target_chan: paramiko.Channel, callback) -> None:
+    """Forward target stdout through a callback for processing."""
     try:
         while True:
             data = target_chan.recv(4096)
             if not data:
                 break
-            admin_chan.send(data)
-            text = data.decode("utf-8", errors="ignore")
-            sys.stdout.write(f"{CLR_TARGET}{text}{CLR_RESET}")
-            sys.stdout.flush()
+            callback(data)
     except Exception:
         pass
+
+
+_SHELL_PROMPT_RE = re.compile(
+    r"(?:"
+    r"[\$#%>]\s*$"              # classic prompts: $, #, %, >
+    r"|@.*[:\~].*[\$#]\s*$"     # user@host:~$
+    r"|\]\$\s*$"                # [user@host ~]$
+    r")",
+)
+
+
+def _detect_shell_return(text: str) -> bool:
+    """Heuristic: detect if target output looks like we're back at a shell prompt."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    last_line = stripped.splitlines()[-1].strip()
+    if _SHELL_PROMPT_RE.search(last_line):
+        return True
+    return False
 
 
 def handle_session(
@@ -97,9 +135,39 @@ def handle_session(
         ssh.connect(target_host, target_port, target_user, target_pass)
         target_chan = ssh.invoke_shell()
 
+        interactive_lock = threading.Lock()
+        interactive_mode = False
+        interactive_cmd = ""
+        interactive_buffer: list[str] = []
+        content_alert_sent = False
+
+        def _on_target_data(data: bytes) -> None:
+            nonlocal interactive_mode
+            admin_chan.send(data)
+            text = data.decode("utf-8", errors="ignore")
+            sys.stdout.write(f"{CLR_TARGET}{text}{CLR_RESET}")
+            sys.stdout.flush()
+            if interactive_mode and _detect_shell_return(text):
+                with interactive_lock:
+                    interactive_mode = False
+                _flush_interactive_buffer()
+                print(f"\n{CLR_SYSTEM}[AI] Интерактивный режим завершён "
+                      f"({interactive_cmd}). Контроль восстановлен.{CLR_RESET}")
+
+        def _flush_interactive_buffer() -> None:
+            nonlocal content_alert_sent
+            if interactive_buffer:
+                full_text = "".join(interactive_buffer)
+                if full_text.strip():
+                    session.add_command(
+                        f"[содержимое внутри {interactive_cmd}]: {len(full_text)} символов",
+                    )
+                interactive_buffer.clear()
+            content_alert_sent = False
+
         threading.Thread(
-            target=bridge_target_output,
-            args=(target_chan, admin_chan),
+            target=_bridge_with_callback,
+            args=(target_chan, _on_target_data),
             daemon=True,
         ).start()
 
@@ -113,39 +181,117 @@ def handle_session(
                 if not char:
                     break
 
+                with interactive_lock:
+                    in_interactive = interactive_mode
+
+                if in_interactive:
+                    target_chan.send(char)
+                    decoded = char.decode("utf-8", errors="ignore")
+                    interactive_buffer.append(decoded)
+                    if not content_alert_sent and len(interactive_buffer) % 32 == 0:
+                        buf_text = "".join(interactive_buffer)
+                        threat = engine._rule_engine.scan_content(buf_text)
+                        if threat:
+                            content_alert_sent = True
+                            print(
+                                f"\n{CLR_ERROR}{CLR_BOLD}"
+                                f"[CONTENT MONITOR] ОПАСНОЕ СОДЕРЖИМОЕ в {interactive_cmd}!"
+                                f"{CLR_RESET}\n"
+                                f"  {CLR_ERROR}{threat.reason}{CLR_RESET}\n"
+                                f"  {CLR_TARGET}Severity: {threat.severity.value}{CLR_RESET}"
+                            )
+                            admin_chan.send(
+                                f"\r\n{CLR_ERROR}[AI DEFENSE] ОБНАРУЖЕНО ОПАСНОЕ СОДЕРЖИМОЕ: "
+                                f"{threat.reason}{CLR_RESET}\r\n".encode()
+                            )
+                            from ai_defense.core.models import FinalVerdict
+                            alert_verdict = FinalVerdict(
+                                verdict=threat.verdict,
+                                decisions=[threat],
+                                reason=f"Опасное содержимое внутри {interactive_cmd}: {threat.reason}",
+                            )
+                            engine._audit.log_decision(session, f"[content:{interactive_cmd}]", alert_verdict)
+                            engine._alerts.notify(session, f"[content:{interactive_cmd}]", alert_verdict)
+                    continue
+
+                if char == b"\x03":
+                    cmd_buffer.clear()
+                    target_chan.send(char)
+                    continue
+
                 if char in (b"\r", b"\n"):
-                    full_cmd = b"".join(cmd_buffer).decode("utf-8", errors="ignore").strip()
+                    from ai_defense.core.rule_engine import RuleEngine as _RE
+                    full_cmd = _RE.sanitize(b"".join(cmd_buffer).decode("utf-8", errors="ignore"))
 
                     if full_cmd:
-                        verdict = engine.evaluate(full_cmd, session)
+                        if INTERACTIVE_PROGRAMS.search(full_cmd):
+                            verdict = engine.evaluate(full_cmd, session)
 
-                        if verdict.verdict == Verdict.ALLOW:
-                            target_chan.send(char)
-                        elif verdict.verdict == Verdict.DENY:
-                            admin_chan.send(
-                                f"\r\n{CLR_ERROR}[AI DEFENSE] КОМАНДА ЗАБЛОКИРОВАНА{CLR_RESET}\r\n".encode()
-                            )
-                            _send_deny_details(admin_chan, verdict)
-                            target_chan.send(b"\x03")
-                            admin_chan.send(b"\x15")
-                        else:
-                            result = _handle_escalation(admin_chan, full_cmd, verdict)
-                            if result:
-                                target_chan.send(char)
-                            else:
+                            if verdict.verdict == Verdict.DENY:
                                 admin_chan.send(
-                                    f"\r\n{CLR_ERROR}[ЭСКАЛАЦИЯ] Отклонено администратором{CLR_RESET}\r\n".encode()
+                                    f"\r\n{CLR_ERROR}[AI DEFENSE] КОМАНДА ЗАБЛОКИРОВАНА{CLR_RESET}\r\n".encode()
                                 )
+                                _send_deny_details(admin_chan, verdict)
                                 target_chan.send(b"\x03")
                                 admin_chan.send(b"\x15")
+                            elif verdict.verdict == Verdict.ESCALATE:
+                                result = _handle_escalation(admin_chan, full_cmd, verdict)
+                                if result:
+                                    with interactive_lock:
+                                        interactive_mode = True
+                                    interactive_cmd = full_cmd
+                                    target_chan.send(char)
+                                    print(f"{CLR_SYSTEM}[AI] Интерактивный режим: "
+                                          f"{CLR_BOLD}{full_cmd}{CLR_RESET}"
+                                          f"{CLR_SYSTEM}. Passthrough до выхода.{CLR_RESET}")
+                                else:
+                                    admin_chan.send(
+                                        f"\r\n{CLR_ERROR}[ЭСКАЛАЦИЯ] Отклонено{CLR_RESET}\r\n".encode()
+                                    )
+                                    target_chan.send(b"\x03")
+                                    admin_chan.send(b"\x15")
+                            else:
+                                with interactive_lock:
+                                    interactive_mode = True
+                                interactive_cmd = full_cmd
+                                target_chan.send(char)
+                                print(f"{CLR_SYSTEM}[AI] Интерактивный режим: "
+                                      f"{CLR_BOLD}{full_cmd}{CLR_RESET}"
+                                      f"{CLR_SYSTEM}. Passthrough до выхода.{CLR_RESET}")
+                        else:
+                            verdict = engine.evaluate(full_cmd, session)
+
+                            if verdict.verdict == Verdict.ALLOW:
+                                target_chan.send(char)
+                            elif verdict.verdict == Verdict.DENY:
+                                admin_chan.send(
+                                    f"\r\n{CLR_ERROR}[AI DEFENSE] КОМАНДА ЗАБЛОКИРОВАНА{CLR_RESET}\r\n".encode()
+                                )
+                                _send_deny_details(admin_chan, verdict)
+                                target_chan.send(b"\x03")
+                                admin_chan.send(b"\x15")
+                            else:
+                                result = _handle_escalation(admin_chan, full_cmd, verdict)
+                                if result:
+                                    target_chan.send(char)
+                                else:
+                                    admin_chan.send(
+                                        f"\r\n{CLR_ERROR}[ЭСКАЛАЦИЯ] Отклонено{CLR_RESET}\r\n".encode()
+                                    )
+                                    target_chan.send(b"\x03")
+                                    admin_chan.send(b"\x15")
                     else:
                         target_chan.send(char)
 
-                    cmd_buffer = []
+                    cmd_buffer.clear()
                 else:
-                    if char == b"\x7f":
+                    if char == b"\x7f" or char == b"\x08":
                         if cmd_buffer:
                             cmd_buffer.pop()
+                    elif char == b"\x1b":
+                        pass
+                    elif char[0:1] < b"\x20" and char not in (b"\t",):
+                        pass
                     else:
                         cmd_buffer.append(char)
                     target_chan.send(char)
@@ -198,13 +344,7 @@ def _handle_escalation(admin_chan: paramiko.Channel, command: str, verdict) -> b
     sys.stdout.write(f"{CLR_SYSTEM}[ЭСКАЛАЦИЯ] Разрешить? [y/n]: {CLR_RESET}")
     sys.stdout.flush()
 
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    ch = sys.stdin.read(1)
 
     approved = ch.lower() in ("y", "т", "t", "l")
     if approved:

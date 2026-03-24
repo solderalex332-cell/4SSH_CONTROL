@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,6 +15,9 @@ from .consensus import ConsensusEngine
 from .llm_client import LLMClient
 from .models import AgentDecision, FinalVerdict, SessionContext, Verdict
 from .rule_engine import RuleEngine
+
+MAX_COMMANDS_PER_WINDOW = 30
+RATE_WINDOW_SECONDS = 60.0
 
 log = logging.getLogger("ai_defense.engine")
 
@@ -62,6 +66,7 @@ class AIEngine:
         self._alerts = AlertEngine(cfg.alerts)
         self._sessions: dict[str, SessionContext] = {}
         self._executor = ThreadPoolExecutor(max_workers=3)
+        self._rate_buckets: dict[str, collections.deque] = {}
 
     def create_session(self, username: str = "", role: str = "") -> SessionContext:
         session = SessionContext(username=username, role=role)
@@ -75,8 +80,37 @@ class AIEngine:
         self._sessions.pop(session.session_id, None)
         log.info("Session ended: %s (%d commands)", session.session_id, len(session.commands))
 
+    def _check_rate_limit(self, session: SessionContext) -> FinalVerdict | None:
+        now = time.monotonic()
+        sid = session.session_id
+        if sid not in self._rate_buckets:
+            self._rate_buckets[sid] = collections.deque()
+        bucket = self._rate_buckets[sid]
+        while bucket and now - bucket[0] > RATE_WINDOW_SECONDS:
+            bucket.popleft()
+        if len(bucket) >= MAX_COMMANDS_PER_WINDOW:
+            return FinalVerdict(
+                verdict=Verdict.DENY,
+                decisions=[AgentDecision(
+                    agent_name="rate_limiter",
+                    verdict=Verdict.DENY,
+                    confidence=1.0,
+                    reason=f"Превышен лимит: {MAX_COMMANDS_PER_WINDOW} команд за {RATE_WINDOW_SECONDS:.0f}с",
+                )],
+                reason=f"Rate limit: {MAX_COMMANDS_PER_WINDOW} cmd/{RATE_WINDOW_SECONDS:.0f}s exceeded",
+            )
+        bucket.append(now)
+        return None
+
     def evaluate(self, command: str, session: SessionContext) -> FinalVerdict:
         t0 = time.perf_counter()
+
+        rate_verdict = self._check_rate_limit(session)
+        if rate_verdict:
+            self._print_verdict(command, rate_verdict, (time.perf_counter() - t0) * 1000)
+            session.add_command(command, rate_verdict.verdict)
+            self._audit.log_decision(session, command, rate_verdict)
+            return rate_verdict
 
         rule_decision = self._rule_engine.evaluate(command)
         if rule_decision is not None:

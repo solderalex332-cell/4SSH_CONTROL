@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -20,6 +21,7 @@ class AuditLogger:
         self._db_path = Path(cfg.db_path)
         self._jsonl_path = Path(cfg.json_log)
         self._conn: sqlite3.Connection | None = None
+        self._lock = threading.Lock()
         self._init_db()
 
     def _init_db(self) -> None:
@@ -77,14 +79,15 @@ class AuditLogger:
         agents_json = json.dumps(agents_data, ensure_ascii=False)
 
         try:
-            self._conn.execute(
-                "INSERT INTO audit_log (timestamp, session_id, username, role, command, verdict, reason, severity, agents_json, escalated) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (ts, session.session_id, session.username, session.role,
-                 command, verdict.verdict.value, verdict.reason, max_severity,
-                 agents_json, int(verdict.escalated)),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO audit_log (timestamp, session_id, username, role, command, verdict, reason, severity, agents_json, escalated) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ts, session.session_id, session.username, session.role,
+                     command, verdict.verdict.value, verdict.reason, max_severity,
+                     agents_json, int(verdict.escalated)),
+                )
+                self._conn.commit()
         except Exception as exc:
             log.error("SQLite write error: %s", exc)
 
@@ -108,42 +111,46 @@ class AuditLogger:
 
     def log_session_start(self, session: SessionContext) -> None:
         try:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO sessions (session_id, username, role, start_time, cmd_count) VALUES (?, ?, ?, ?, 0)",
-                (session.session_id, session.username, session.role, session.start_time),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO sessions (session_id, username, role, start_time, cmd_count) VALUES (?, ?, ?, ?, 0)",
+                    (session.session_id, session.username, session.role, session.start_time),
+                )
+                self._conn.commit()
         except Exception as exc:
             log.error("Session start log error: %s", exc)
 
     def log_session_end(self, session: SessionContext) -> None:
         try:
-            self._conn.execute(
-                "UPDATE sessions SET end_time = ?, cmd_count = ? WHERE session_id = ?",
-                (time.time(), len(session.commands), session.session_id),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE sessions SET end_time = ?, cmd_count = ? WHERE session_id = ?",
+                    (time.time(), len(session.commands), session.session_id),
+                )
+                self._conn.commit()
         except Exception as exc:
             log.error("Session end log error: %s", exc)
 
     def get_recent_logs(self, limit: int = 100) -> list[dict]:
-        cur = self._conn.execute(
-            "SELECT timestamp, session_id, username, role, command, verdict, reason, severity, escalated "
-            "FROM audit_log ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
-        cols = ["timestamp", "session_id", "username", "role", "command", "verdict", "reason", "severity", "escalated"]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT timestamp, session_id, username, role, command, verdict, reason, severity, escalated "
+                "FROM audit_log ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            cols = ["timestamp", "session_id", "username", "role", "command", "verdict", "reason", "severity", "escalated"]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def get_stats(self) -> dict:
-        cur = self._conn.execute("SELECT verdict, COUNT(*) FROM audit_log GROUP BY verdict")
-        verdicts = dict(cur.fetchall())
-        cur2 = self._conn.execute("SELECT COUNT(*) FROM audit_log")
-        total = cur2.fetchone()[0]
-        cur3 = self._conn.execute("SELECT COUNT(*) FROM sessions")
-        sessions = cur3.fetchone()[0]
-        cur4 = self._conn.execute("SELECT COUNT(*) FROM audit_log WHERE severity IN ('high', 'critical')")
-        high_sev = cur4.fetchone()[0]
+        with self._lock:
+            cur = self._conn.execute("SELECT verdict, COUNT(*) FROM audit_log GROUP BY verdict")
+            verdicts = dict(cur.fetchall())
+            cur2 = self._conn.execute("SELECT COUNT(*) FROM audit_log")
+            total = cur2.fetchone()[0]
+            cur3 = self._conn.execute("SELECT COUNT(*) FROM sessions")
+            sessions = cur3.fetchone()[0]
+            cur4 = self._conn.execute("SELECT COUNT(*) FROM audit_log WHERE severity IN ('high', 'critical')")
+            high_sev = cur4.fetchone()[0]
         return {
             "total_commands": total,
             "total_sessions": sessions,
@@ -152,13 +159,14 @@ class AuditLogger:
         }
 
     def get_session_logs(self, session_id: str) -> list[dict]:
-        cur = self._conn.execute(
-            "SELECT timestamp, command, verdict, reason, severity, agents_json "
-            "FROM audit_log WHERE session_id = ? ORDER BY id ASC",
-            (session_id,),
-        )
-        cols = ["timestamp", "command", "verdict", "reason", "severity", "agents_json"]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT timestamp, command, verdict, reason, severity, agents_json "
+                "FROM audit_log WHERE session_id = ? ORDER BY id ASC",
+                (session_id,),
+            )
+            cols = ["timestamp", "command", "verdict", "reason", "severity", "agents_json"]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def close(self) -> None:
         if self._conn:
