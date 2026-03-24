@@ -178,6 +178,24 @@ def _normalize_rm_flags(cmd: str) -> str:
     return " ".join(filter(None, [parts[0], flag_str] + args))
 
 
+_BINARY_SUSPICIOUS_PATTERNS: list[tuple[re.Pattern, str, Severity]] = [
+    (re.compile(r"/bin/sh\b"), "Вызов /bin/sh в бинарнике", Severity.HIGH),
+    (re.compile(r"/bin/bash\b"), "Вызов /bin/bash в бинарнике", Severity.HIGH),
+    (re.compile(r"\bexecve\b"), "Использование execve syscall", Severity.MEDIUM),
+    (re.compile(r"\bsystem\b"), "Использование system() — выполнение произвольных команд", Severity.HIGH),
+    (re.compile(r"\bsocket\b.*\bconnect\b", re.DOTALL), "Сетевое подключение (socket+connect)", Severity.HIGH),
+    (re.compile(r"/dev/tcp/"), "Reverse shell через /dev/tcp", Severity.CRITICAL),
+    (re.compile(r"\bpopen\b"), "Использование popen() — выполнение команд через shell", Severity.HIGH),
+    (re.compile(r"\bdlopen\b"), "Динамическая загрузка библиотек (dlopen)", Severity.MEDIUM),
+    (re.compile(r"\bptrace\b"), "Использование ptrace — отладка/инъекция процессов", Severity.HIGH),
+    (re.compile(r"/etc/shadow"), "Обращение к /etc/shadow", Severity.CRITICAL),
+    (re.compile(r"/etc/passwd"), "Обращение к /etc/passwd", Severity.HIGH),
+    (re.compile(r"\bkeylog"), "Потенциальный кейлоггер", Severity.CRITICAL),
+    (re.compile(r"\bcrypt\b"), "Криптографические операции", Severity.MEDIUM),
+    (re.compile(r"\bBASE64\b|base64_", re.IGNORECASE), "Base64 обфускация", Severity.MEDIUM),
+]
+
+
 class RuleEngine:
     """Layer-0 instant filter: whitelist/blacklist/sensitive paths."""
 
@@ -378,4 +396,37 @@ class RuleEngine:
                     reason=f"Опасное содержимое: {reason}",
                     severity=severity,
                 )
+        return None
+
+    def scan_strings(self, strings_output: str) -> AgentDecision | None:
+        """Scan extracted strings from a binary file for suspicious patterns.
+
+        Also checks against dangerous_content rules and blacklist patterns.
+        """
+        t0 = time.perf_counter()
+
+        for pattern, reason, severity in _BINARY_SUSPICIOUS_PATTERNS:
+            if pattern.search(strings_output):
+                return AgentDecision(
+                    agent_name="binary_inspector",
+                    verdict=Verdict.DENY if severity in (Severity.CRITICAL, Severity.HIGH) else Verdict.ESCALATE,
+                    confidence=0.9,
+                    category=CommandCategory.RISKY,
+                    reason=f"Подозрительный бинарник: {reason}",
+                    severity=severity,
+                    elapsed_ms=(time.perf_counter() - t0) * 1000,
+                )
+
+        for dc_pattern, dc_reason, dc_severity in self._dangerous_content:
+            if dc_pattern in strings_output:
+                return AgentDecision(
+                    agent_name="binary_inspector",
+                    verdict=Verdict.DENY,
+                    confidence=0.9,
+                    category=CommandCategory.DESTRUCTIVE,
+                    reason=f"Опасные строки в бинарнике: {dc_reason}",
+                    severity=dc_severity,
+                    elapsed_ms=(time.perf_counter() - t0) * 1000,
+                )
+
         return None

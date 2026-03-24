@@ -8,6 +8,10 @@ from fastapi.responses import HTMLResponse
 from ..core.audit import AuditLogger
 
 
+def _html_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
 def create_app(audit: AuditLogger) -> FastAPI:
     app = FastAPI(title="4SSH_CONTROL Dashboard", docs_url=None, redoc_url=None)
 
@@ -49,17 +53,22 @@ def _render_dashboard(audit: AuditLogger) -> str:
         vc = {"allow": "#22c55e", "deny": "#ef4444", "escalate": "#eab308"}.get(v, "#888")
         sev = entry.get("severity", "")
         sc = {"critical": "#ef4444", "high": "#f97316", "medium": "#eab308", "low": "#22c55e"}.get(sev, "#888")
-        esc = "⚡" if entry.get("escalated") else ""
-        cmd_escaped = str(entry["command"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        reason_escaped = str(entry.get("reason", "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        escalated = entry.get("escalated")
+        if escalated:
+            esc_label = f' <span style="color:#eab308;font-size:0.65rem;">⚡ эскалация</span>'
+        else:
+            esc_label = ""
+        cmd_escaped = _html_escape(str(entry["command"]))
+        reason_escaped = _html_escape(str(entry.get("reason", "")))
+        username_escaped = _html_escape(str(entry.get("username", "")))
 
         log_rows += f"""
         <tr>
             <td class="ts">{ts}</td>
             <td>{str(entry.get('session_id', ''))[:8]}</td>
-            <td>{str(entry.get('username', '')).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')}</td>
+            <td>{username_escaped}</td>
             <td><code>{cmd_escaped}</code></td>
-            <td><span class="badge" style="background:{vc}">{v.upper()}</span> {esc}</td>
+            <td><span class="badge" style="background:{vc}">{v.upper()}</span>{esc_label}</td>
             <td><span class="badge-sm" style="background:{sc}">{sev}</span></td>
             <td class="reason">{reason_escaped}</td>
         </tr>"""
@@ -87,15 +96,22 @@ def _render_dashboard(audit: AuditLogger) -> str:
   }}
   .card .num {{ font-size:2rem; font-weight:700; }}
   .card .label {{ color:var(--dim); font-size:0.75rem; text-transform:uppercase; margin-top:4px; }}
-  table {{ width:100%; border-collapse:collapse; font-size:0.8rem; }}
+  table {{ width:100%; border-collapse:collapse; font-size:0.8rem; table-layout:fixed; }}
   th {{ text-align:left; color:var(--dim); padding:10px 8px; border-bottom:2px solid var(--border); font-size:0.7rem; text-transform:uppercase; }}
-  td {{ padding:8px; border-bottom:1px solid var(--border); vertical-align:top; }}
+  td {{ padding:8px; border-bottom:1px solid var(--border); vertical-align:top; word-wrap:break-word; overflow-wrap:break-word; }}
   tr:hover {{ background:rgba(56,189,248,0.05); }}
   .ts {{ color:var(--dim); white-space:nowrap; font-size:0.75rem; }}
-  code {{ background:rgba(56,189,248,0.1); padding:2px 6px; border-radius:4px; font-size:0.8rem; }}
-  .badge {{ display:inline-block; padding:2px 10px; border-radius:999px; color:#fff; font-size:0.7rem; font-weight:600; }}
+  .col-ts {{ width:130px; }}
+  .col-sess {{ width:70px; }}
+  .col-user {{ width:80px; }}
+  .col-cmd {{ width:25%; }}
+  .col-verdict {{ width:110px; }}
+  .col-sev {{ width:70px; }}
+  .col-reason {{ }}
+  code {{ background:rgba(56,189,248,0.1); padding:2px 6px; border-radius:4px; font-size:0.8rem; word-break:break-all; }}
+  .badge {{ display:inline-block; padding:2px 10px; border-radius:999px; color:#fff; font-size:0.7rem; font-weight:600; white-space:nowrap; }}
   .badge-sm {{ display:inline-block; padding:1px 6px; border-radius:999px; color:#fff; font-size:0.65rem; }}
-  .reason {{ color:var(--dim); font-size:0.75rem; max-width:300px; overflow:hidden; text-overflow:ellipsis; }}
+  .reason {{ color:var(--dim); font-size:0.75rem; }}
   .refresh {{ color:var(--accent); text-decoration:none; font-size:0.8rem; }}
   .header {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }}
 </style>
@@ -122,7 +138,7 @@ def _render_dashboard(audit: AuditLogger) -> str:
 <div style="overflow-x:auto;">
 <table>
   <thead><tr>
-    <th>Время</th><th>Сессия</th><th>Пользователь</th><th>Команда</th><th>Вердикт</th><th>Severity</th><th>Причина</th>
+    <th class="col-ts">Время</th><th class="col-sess">Сессия</th><th class="col-user">Пользователь</th><th class="col-cmd">Команда</th><th class="col-verdict">Вердикт</th><th class="col-sev">Severity</th><th class="col-reason">Причина</th>
   </tr></thead>
   <tbody>{log_rows if log_rows else '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:40px;">Нет данных</td></tr>'}</tbody>
 </table>

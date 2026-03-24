@@ -5,6 +5,7 @@
 
 import argparse
 import logging
+import os
 import select
 import socket
 import sys
@@ -18,7 +19,7 @@ import re
 
 from ai_defense.core.config import load_config
 from ai_defense.core.engine import AIEngine
-from ai_defense.core.models import Verdict
+from ai_defense.core.models import AgentDecision, FinalVerdict, Verdict
 
 INTERACTIVE_PROGRAMS = re.compile(
     r"^(?:sudo\s+)?(?:vi|vim|nvim|nano|pico|emacs|mcedit|joe|jed"
@@ -219,7 +220,6 @@ def handle_session(
                                 f"\r\n{CLR_ERROR}[AI DEFENSE] ОБНАРУЖЕНО ОПАСНОЕ СОДЕРЖИМОЕ: "
                                 f"{threat.reason}{CLR_RESET}\r\n".encode()
                             )
-                            from ai_defense.core.models import FinalVerdict
                             alert_verdict = FinalVerdict(
                                 verdict=threat.verdict,
                                 decisions=[threat],
@@ -240,7 +240,7 @@ def handle_session(
 
                     if full_cmd:
                         if INTERACTIVE_PROGRAMS.search(full_cmd):
-                            verdict = engine.evaluate(full_cmd, session)
+                            verdict = engine.evaluate(full_cmd, session, ssh_client=ssh)
 
                             if verdict.verdict == Verdict.DENY:
                                 admin_chan.send(
@@ -251,6 +251,7 @@ def handle_session(
                                 admin_chan.send(b"\x15")
                             elif verdict.verdict == Verdict.ESCALATE:
                                 result = _handle_escalation(admin_chan, full_cmd, verdict)
+                                _log_escalation_result(engine, session, full_cmd, verdict, result)
                                 if result:
                                     with interactive_lock:
                                         interactive_mode = True
@@ -274,7 +275,7 @@ def handle_session(
                                       f"{CLR_BOLD}{full_cmd}{CLR_RESET}"
                                       f"{CLR_SYSTEM}. Passthrough до выхода.{CLR_RESET}")
                         else:
-                            verdict = engine.evaluate(full_cmd, session)
+                            verdict = engine.evaluate(full_cmd, session, ssh_client=ssh)
 
                             if verdict.verdict == Verdict.ALLOW:
                                 target_chan.send(char)
@@ -287,6 +288,7 @@ def handle_session(
                                 admin_chan.send(b"\x15")
                             else:
                                 result = _handle_escalation(admin_chan, full_cmd, verdict)
+                                _log_escalation_result(engine, session, full_cmd, verdict, result)
                                 if result:
                                     target_chan.send(char)
                                 else:
@@ -340,6 +342,25 @@ def _send_deny_details(admin_chan: paramiko.Channel, verdict) -> None:
             admin_chan.send(line.encode())
 
 
+def _log_escalation_result(engine: AIEngine, session, command: str, original_verdict, approved: bool) -> None:
+    """Record admin's escalation decision in audit so dashboard reflects the final outcome."""
+    final_verdict_val = Verdict.ALLOW if approved else Verdict.DENY
+    admin_decision = AgentDecision(
+        agent_name="admin_escalation",
+        verdict=final_verdict_val,
+        confidence=1.0,
+        reason=f"Admin-2 {'разрешил' if approved else 'отклонил'} после эскалации",
+    )
+    all_decisions = list(original_verdict.decisions) + [admin_decision]
+    final = FinalVerdict(
+        verdict=final_verdict_val,
+        decisions=all_decisions,
+        reason=f"Эскалация → Admin-2: {'РАЗРЕШЕНО' if approved else 'ОТКЛОНЕНО'}",
+        escalated=True,
+    )
+    engine._audit.log_decision(session, command, final)
+
+
 def _handle_escalation(admin_chan: paramiko.Channel, command: str, verdict) -> bool:
     """When AI is unsure — ask local Admin-2 for manual override."""
     admin_chan.send(f"\r\n{CLR_SYSTEM}[AI DEFENSE] Команда передана на эскалацию...{CLR_RESET}\r\n".encode())
@@ -347,14 +368,21 @@ def _handle_escalation(admin_chan: paramiko.Channel, command: str, verdict) -> b
     reasons = []
     for d in verdict.decisions:
         if d.reason:
-            reasons.append(f"  {d.agent_name}: {d.reason}")
+            reasons.append(f"{d.agent_name}: {d.reason}")
 
-    print(f"\n{CLR_BOLD}{CLR_SYSTEM}╔═══ ЭСКАЛАЦИЯ ═══════════════════════════════╗{CLR_RESET}")
-    print(f"{CLR_SYSTEM}║ AI не уверен. Требуется решение Admin-2.    ║{CLR_RESET}")
-    print(f"{CLR_SYSTEM}║ Команда: {CLR_ADMIN1}{command:<35}{CLR_SYSTEM}║{CLR_RESET}")
+    try:
+        tw = os.get_terminal_size().columns
+    except (AttributeError, ValueError, OSError):
+        tw = 80
+    BOX_W = min(max(tw, 40), 80)
+    inner = BOX_W - 4
+
+    print(f"\n{CLR_BOLD}{CLR_SYSTEM}╔{'═' * (BOX_W - 2)}╗{CLR_RESET}")
+    print(f"{CLR_SYSTEM}║  {'AI не уверен. Требуется решение Admin-2.':<{inner}}║{CLR_RESET}")
+    _print_box_line(f"Команда: {command}", inner, CLR_ADMIN1)
     for r in reasons:
-        print(f"{CLR_SYSTEM}║ {CLR_TARGET}{r:<44}{CLR_SYSTEM}║{CLR_RESET}")
-    print(f"{CLR_SYSTEM}╚═════════════════════════════════════════════╝{CLR_RESET}")
+        _print_box_line(r, inner, CLR_TARGET)
+    print(f"{CLR_SYSTEM}╚{'═' * (BOX_W - 2)}╝{CLR_RESET}")
 
     sys.stdout.write(f"{CLR_SYSTEM}[ЭСКАЛАЦИЯ] Разрешить? [y/n]: {CLR_RESET}")
     sys.stdout.flush()
@@ -367,6 +395,16 @@ def _handle_escalation(admin_chan: paramiko.Channel, command: str, verdict) -> b
     else:
         print(f"{CLR_ERROR} ОТКЛОНЕНО (Admin-2){CLR_RESET}")
     return approved
+
+
+def _print_box_line(text: str, inner_width: int, color: str = "") -> None:
+    """Print a line inside a box, wrapping long text across multiple lines."""
+    c = color or CLR_SYSTEM
+    while len(text) > inner_width:
+        chunk = text[:inner_width]
+        text = text[inner_width:]
+        print(f"{CLR_SYSTEM}║  {c}{chunk}{CLR_RESET}{CLR_SYSTEM}║{CLR_RESET}")
+    print(f"{CLR_SYSTEM}║  {c}{text:<{inner_width}}{CLR_RESET}{CLR_SYSTEM}║{CLR_RESET}")
 
 
 def print_banner() -> None:
