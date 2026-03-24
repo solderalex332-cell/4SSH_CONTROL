@@ -1,0 +1,9 @@
+paramiko
+openai
+pyyaml
+aiohttp
+aiosqlite
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart

@@ -1,0 +1,232 @@
+llm:
+  provider: "openai"            # openai | ollama
+  model: "gpt-4o-mini"
+  api_key: ""                   # или переменная окружения OPENAI_API_KEY
+  base_url: ""                  # для Ollama: http://localhost:11434/v1
+  temperature: 0.1
+  timeout: 10
+
+agents:
+  command_classifier:
+    enabled: true
+    weight: 1.0                 # вес голоса при консенсусе
+  context_analyzer:
+    enabled: true
+    weight: 1.5                 # больший вес — учитывает контекст
+    max_history: 50             # максимум команд в истории сессии
+  policy_enforcer:
+    enabled: true
+    weight: 1.2
+
+consensus:
+  strategy: "weighted_majority" # weighted_majority | unanimous | any_deny
+  deny_threshold: 0.5          # при weighted_majority — доля для deny
+  escalate_on_disagreement: true
+
+rules:
+  whitelist:
+    - "ls"
+    - "pwd"
+    - "whoami"
+    - "date"
+    - "uptime"
+    - "hostname"
+    - "id"
+    - "cat /etc/hostname"
+    - "uname -a"
+    - "df -h"
+    - "free -h"
+    - "top -bn1"
+    - "ps aux"
+    - "ip a"
+    - "ip addr"
+    - "ifconfig"
+    - "netstat -tlnp"
+    - "ss -tlnp"
+
+  blacklist:
+    - pattern: "rm\\s+-rf\\s+/"
+      reason: "Рекурсивное удаление от корня"
+      severity: "critical"
+    - pattern: "rm\\s+-rf\\s+\\*"
+      reason: "Массовое удаление"
+      severity: "critical"
+    - pattern: ":(){ :|:& };:"
+      reason: "Fork bomb"
+      severity: "critical"
+    - pattern: "dd\\s+if=.*/dev/"
+      reason: "Прямая запись на блочное устройство"
+      severity: "critical"
+    - pattern: "mkfs\\."
+      reason: "Форматирование файловой системы"
+      severity: "critical"
+    - pattern: "chmod\\s+-R\\s+777"
+      reason: "Полный доступ рекурсивно"
+      severity: "high"
+    - pattern: "chmod\\s+777"
+      reason: "Полный доступ"
+      severity: "high"
+    - pattern: ">\\s*/dev/sd[a-z]"
+      reason: "Затирание блочного устройства"
+      severity: "critical"
+    - pattern: "wget.*\\|\\s*(bash|sh)"
+      reason: "Загрузка и исполнение удалённого скрипта"
+      severity: "critical"
+    - pattern: "curl.*\\|\\s*(bash|sh)"
+      reason: "Загрузка и исполнение удалённого скрипта"
+      severity: "critical"
+    - pattern: "shutdown"
+      reason: "Выключение сервера"
+      severity: "high"
+    - pattern: "reboot"
+      reason: "Перезагрузка сервера"
+      severity: "high"
+    - pattern: "init\\s+0"
+      reason: "Выключение через init"
+      severity: "high"
+    - pattern: "systemctl\\s+(stop|disable)\\s+(sshd|firewalld|iptables|ufw)"
+      reason: "Остановка критичного сервиса"
+      severity: "critical"
+    - pattern: "iptables\\s+-F"
+      reason: "Сброс правил файрвола"
+      severity: "critical"
+    - pattern: "ufw\\s+disable"
+      reason: "Отключение файрвола"
+      severity: "critical"
+    - pattern: "passwd\\s+root"
+      reason: "Смена пароля root"
+      severity: "high"
+    - pattern: "visudo"
+      reason: "Редактирование sudoers"
+      severity: "high"
+    - pattern: "nc\\s+-[elp]"
+      reason: "Netcat listener (потенциальный бэкдор)"
+      severity: "critical"
+    - pattern: "/dev/tcp/"
+      reason: "Reverse shell через /dev/tcp"
+      severity: "critical"
+    - pattern: "history\\s+-c"
+      reason: "Очистка истории (сокрытие следов)"
+      severity: "high"
+    - pattern: "shred"
+      reason: "Безвозвратное удаление данных"
+      severity: "high"
+
+rbac:
+  roles:
+    dev:
+      description: "Разработчик"
+      allowed_commands:
+        - "ls"
+        - "cat"
+        - "grep"
+        - "tail"
+        - "head"
+        - "less"
+        - "ps"
+        - "top"
+        - "df"
+        - "du"
+        - "git"
+        - "docker logs"
+        - "docker ps"
+        - "kubectl get"
+        - "kubectl describe"
+        - "kubectl logs"
+      denied_commands:
+        - "rm"
+        - "systemctl"
+        - "service"
+        - "useradd"
+        - "userdel"
+        - "chmod"
+        - "chown"
+        - "iptables"
+    ops:
+      description: "Системный администратор"
+      allowed_commands: ["*"]
+      denied_commands:
+        - "rm -rf /"
+        - "dd if=/dev/zero"
+    dba:
+      description: "Администратор баз данных"
+      allowed_commands:
+        - "psql"
+        - "mysql"
+        - "mongosh"
+        - "redis-cli"
+        - "pg_dump"
+        - "pg_restore"
+        - "mysqldump"
+        - "ls"
+        - "cat"
+        - "tail"
+        - "grep"
+      denied_commands:
+        - "rm"
+        - "systemctl"
+        - "useradd"
+        - "iptables"
+    neteng:
+      description: "Сетевой инженер"
+      allowed_commands:
+        - "ip"
+        - "ifconfig"
+        - "ping"
+        - "traceroute"
+        - "netstat"
+        - "ss"
+        - "tcpdump"
+        - "nmap"
+        - "dig"
+        - "nslookup"
+        - "iptables -L"
+        - "ufw status"
+        - "ls"
+        - "cat"
+      denied_commands:
+        - "rm"
+        - "useradd"
+        - "passwd"
+
+  users:
+    admin:
+      role: "ops"
+    dev_user:
+      role: "dev"
+    dba_user:
+      role: "dba"
+
+  time_policy:
+    high_risk_hours:
+      start: "22:00"
+      end: "06:00"
+      timezone: "Europe/Moscow"
+      action: "escalate"        # escalate | deny | warn
+
+alerts:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+  webhook:
+    enabled: false
+    url: ""
+    headers:
+      Content-Type: "application/json"
+
+audit:
+  db_path: "audit.db"
+  json_log: "audit.jsonl"
+  retention_days: 90
+
+dashboard:
+  host: "127.0.0.1"
+  port: 8080
+
+bastion:
+  listen_port: 2222
+  target_host: ""
+  target_port: 22
+  target_user: ""
+  target_password: ""
