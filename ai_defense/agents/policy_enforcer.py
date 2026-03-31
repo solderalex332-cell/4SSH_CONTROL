@@ -80,9 +80,17 @@ class PolicyEnforcerAgent:
     def _extract_base_command(command: str) -> str:
         """Extract the base utility name from a command string."""
         cmd = command.strip()
-        for prefix in ("sudo ", "busybox ", "env ", "command ", "exec "):
+        for prefix in ("sudo ", "busybox ", "command ", "exec "):
             if cmd.startswith(prefix):
                 cmd = cmd[len(prefix):].lstrip()
+        if cmd.startswith("env "):
+            cmd = cmd[4:].lstrip()
+            while cmd:
+                tok = cmd.split()[0] if cmd.split() else ""
+                if "=" in tok or tok.startswith("-"):
+                    cmd = cmd[len(tok):].lstrip()
+                else:
+                    break
         return cmd.split()[0] if cmd.split() else ""
 
     def _check_rbac_deterministic(self, command: str, role_policy) -> AgentDecision | None:

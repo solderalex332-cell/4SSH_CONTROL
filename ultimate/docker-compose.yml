@@ -1,0 +1,98 @@
+version: "3.9"
+
+services:
+  # ─── PostgreSQL ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ssh_bastion
+      POSTGRES_USER: bastion
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bastion_secret_2026}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bastion -d ssh_bastion"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - bastion_net
+
+  # ─── Redis ──────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - bastion_net
+
+  # ─── FastAPI Control Plane ──────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://bastion:${POSTGRES_PASSWORD:-bastion_secret_2026}@postgres:5432/ssh_bastion
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-change_me_in_production_2026}
+      VT_API_KEY: ${VT_API_KEY:-}
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - bastion_net
+
+  # ─── SSH Bastion ────────────────────────────────────────────
+  bastion:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.bastion
+    ports:
+      - "2222:2222"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      API_URL: http://api:8000
+      BASTION_PORT: "2222"
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    networks:
+      - bastion_net
+
+  # ─── Vue 3 Frontend ─────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    networks:
+      - bastion_net
+
+volumes:
+  pg_data:
+  redis_data:
+
+networks:
+  bastion_net:
+    driver: bridge

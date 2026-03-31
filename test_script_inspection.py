@@ -312,4 +312,5 @@ print(f"\n{'═' * 60}")
 print(f"  ИТОГО: {PASS} passed, {FAIL} failed  ({PASS + FAIL} total)")
 print(f"{'═' * 60}")
 
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)
