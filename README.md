@@ -1,3 +1,59 @@
+# 4SSH_CONTROL v2 — Insider Threat Detection & Prevention
+
+> Основной runtime переработан по архитектуре v2. Он использует **один** AI Risk
+> Analyzer, независимый Policy Engine, fail-closed Decision Engine, защищённые
+> approvals и нормализованный SQLite-аудит. Старый пакет `ai_defense/` сохранён
+> временно как библиотека проверенных правил и для обратной совместимости тестов;
+> legacy multi-agent engine больше не является точкой входа.
+
+## Запуск v2
+
+Требуется Python 3.11+ и проектное окружение:
+
+```bash
+.venv/bin/pip install -r requirements.txt
+```
+
+Сгенерируйте PBKDF2-хеш пароля (сам пароль в конфигурацию не записывается):
+
+```bash
+.venv/bin/python -m app.ssh.authentication
+```
+
+Передайте пользователей через экспортированную переменную `BASTION_USERS_JSON`
+(образец формы есть в `.env.example`), добавьте целевой сервер в
+секцию `targets` файла `config.yaml`, настройте `known_hosts_path` либо системный
+`known_hosts`, затем запустите:
+
+```bash
+export BASTION_USERS_JSON='{"alice":{"role":"ops","password_hash":"pbkdf2_sha256$...","public_keys":[]}}'
+.venv/bin/python bastion.py --target production-1
+DASHBOARD_SESSION_SECRET='<не менее 32 случайных символов>' \
+  .venv/bin/python dashboard.py
+```
+
+По умолчанию бастион слушает только `127.0.0.1:2222`. Пароль или приватный ключ
+для целевого сервера передаются через `TARGET_PASSWORD`/`TARGET_KEY_FILE`.
+Неизвестный host key цели отклоняется. Dashboard доступен на
+`http://127.0.0.1:8080` и использует те же учётные записи.
+
+Текущая v2 работает в режиме `controlled`: команда сначала полностью
+перехватывается и проверяется, затем исполняется отдельным SSH exec-запросом.
+Интерактивные программы и вложенные оболочки блокируются; система не заявляет
+контроль действий внутри них.
+
+Подробности: [архитектура](docs/architecture.md),
+[модель угроз](docs/threat_model.md), [развёртывание](docs/deployment.md).
+
+Эксплуатационные шаблоны: `deploy/systemd/`, `docker-compose.v2.yml`. Online
+backup: `.venv/bin/python -m app.storage.backup --config config.yaml`.
+Цель, host key, target credential и AI endpoint можно безопасно настроить в
+разделе **Setup** dashboard; после сохранения bastion необходимо перезапустить.
+
+---
+
+## Архивное описание первой реализации
+
 # 4SSH_CONTROL — Multi-Agent AI Defense SSH Bastion
 
 SSH-бастион с принципом **«четырёх глаз»**, где роль второго администратора выполняют **три нейросетевых агента** с системой консенсусного голосования.
